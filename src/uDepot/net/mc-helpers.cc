@@ -29,6 +29,7 @@
 #include <climits>
 #include <unistd.h>
 #include <time.h>
+#include <vector>
 
 #include "util/types.h"
 #include "util/debug.h"
@@ -120,12 +121,12 @@ inline int cmd::prepare_kvmbuff_for_get(
 }
 
 __attribute__((warn_unused_result))
-inline int cmd::kv_get_for_mc(
+inline trt::CoroTask cmd::kv_get_for_mc(
 	KV_MbuffInterface &kv,
 	udepot::Mbuff &key_mbuff,
 	udepot::Mbuff &val_mbuff)
 {
-	const int rc = kv.get(key_mbuff, val_mbuff);
+	const int rc = (int)(co_await kv.get(key_mbuff, val_mbuff));
 	switch (rc) {
 	case 0:
 	{
@@ -135,14 +136,14 @@ inline int cmd::kv_get_for_mc(
 			(void *) &expiry_, sizeof(expiry_));
 		if (unlikely(sizeof(expiry_) != copied)) {
 			UDEPOT_ERR("val mbuff failed to copy expiry data.");
-			return ENODATA;
+			co_return (trt::RetT)(int)ENODATA;
 		}
 		if (0 != expiry_) {
 			const time_t cur_time = mc_timer_g.cur_time();
 			if (expiry_ < cur_time) {
 				UDEPOT_DBG("entry expired");
 				// TODO: delete entry
-				return ENODATA;
+				co_return (trt::RetT)(int)ENODATA;
 			}
 		}
 		// TODO: check cas
@@ -153,7 +154,7 @@ inline int cmd::kv_get_for_mc(
 		UDEPOT_ERR("get for req %s failed w/ %s.",
 			mc_req_strs[req_], strerror(rc));
 	}
-	return rc;
+	co_return (trt::RetT)(int)rc;
 }
 
 __attribute__((warn_unused_result))
@@ -190,7 +191,7 @@ inline int cmd::prepare_kvmbuff_for_send(
 }
 
 __attribute__((warn_unused_result))
-inline int cmd::handle_single_kv_get(
+inline trt::CoroTask cmd::handle_single_kv_get(
 	KV_MbuffInterface &kv,
 	const token *const key,
 	udepot::Mbuff &keymb,
@@ -200,21 +201,21 @@ inline int cmd::handle_single_kv_get(
 {
 	int rc = prepare_kvmbuff_for_get(kv, key, keymb, valmb);
 	if (0 != rc)
-		return rc;
-	rc = kv_get_for_mc(kv, keymb, valmb);
+		co_return (trt::RetT)(int)rc;
+	rc = (int)(co_await kv_get_for_mc(kv, keymb, valmb));
 	if (0 != rc)
-		return rc;
+		co_return (trt::RetT)(int)rc;
 	rc = prepare_kvmbuff_for_send(kv, keymb, valmb);
 	if (0 != rc)
-		return rc;
+		co_return (trt::RetT)(int)rc;
 	lenkb = keymb.get_valid_size();
 	lenvb = valmb.get_valid_size();
 	std::tie(rc, lenk) = keymb.get_valid_nchunks(0, lenkb);
 	if (0 != rc)
-		return rc;
+		co_return (trt::RetT)(int)rc;
 	std::tie(rc, lenv) = valmb.get_valid_nchunks(0, lenvb);
 
-	return rc;
+	co_return (trt::RetT)(int)rc;
 }
 
 /**
@@ -241,7 +242,7 @@ inline int cmd::handle_single_kv_get(
  deleted by a client).
  *
  */
-void cmd::handle_multiget(
+trt::CoroTask cmd::handle_multiget(
 	udepot::ConnectionBase &con,
 	KV_MbuffInterface &kv,
 	udepot::MbuffCacheBase &mb_cache,
@@ -253,10 +254,8 @@ void cmd::handle_multiget(
 	// TODO: if ntokens_ == MAX_TOKENS possibly get one more key
 	const token *const end   = &tokens_[ntokens_ - 1];
 	u32 keys_found = 0, tot_iov_len = 0, tot_iov_lenb = 0;
-	udepot::Mbuff *key_mbuffs[end - start + 1];
-	udepot::Mbuff *val_mbuffs[end - start + 1];
-	memset(key_mbuffs, 0, sizeof(*key_mbuffs) * (end - start));
-	memset(val_mbuffs, 0, sizeof(*val_mbuffs) * (end - start));
+	std::vector<udepot::Mbuff *> key_mbuffs(end - start + 1, nullptr);
+	std::vector<udepot::Mbuff *> val_mbuffs(end - start + 1, nullptr);
 	key_mbuffs[0] = &key_mbuff_in;
 	val_mbuffs[0] = &val_mbuff_in;
 	for (const token *key = start; key < end; ++key) {
@@ -265,7 +264,7 @@ void cmd::handle_multiget(
 		if (nullptr == keymb || nullptr == valmb)
 			break;	// will not return any remaining keys
 		size_t lenk = 0, lenv = 0, lenkb = 0, lenvb = 0;
-		int rc = handle_single_kv_get(kv, key, *keymb, *valmb, lenk, lenv, lenkb, lenvb);
+		int rc = (int)(co_await handle_single_kv_get(kv, key, *keymb, *valmb, lenk, lenv, lenkb, lenvb));
 		if (0 != rc)
 			continue;
 		keys_found++;
@@ -281,8 +280,8 @@ void cmd::handle_multiget(
 	assert(strlen(end_get_rsp_msg_) == copied);
 	tot_iov_lenb += copied;
 	// populate iov
-	struct iovec iov[tot_iov_len], *iovp = &iov[0];
-	memset(iov, 0, sizeof(*iov) * tot_iov_len);
+	std::vector<struct iovec> iov_storage(tot_iov_len);
+	struct iovec *iov = iov_storage.data(), *iovp = iov;
 	size_t iov_len = tot_iov_len;
 	for (u32 i = 0; i < keys_found; ++i) {
 		udepot::Mbuff *const keymb = key_mbuffs[i];
@@ -327,31 +326,35 @@ void cmd::handle_multiget(
 	// handle error case
 	if (0 != iov_len) {
 		const u32 len = strlen(end_get_rsp_msg_);
-		const ssize_t n = con.send(end_get_rsp_msg_, len, 0);
-		if (len != n) {
+		const ssize_t n = (ssize_t)(co_await con.send(end_get_rsp_msg_, len, 0));
+		if ((u32)n != len) {
 			UDEPOT_ERR("send resp %s for cmd %s failed with %s %d n=%ld.",
 				end_get_rsp_msg_, mc_req_strs[req_], strerror(errno), errno, n);
 			rsp_ = RSP_SERVER_ERROR;
-			return handle_rsp(con);
+			co_await handle_rsp(con);
+			co_return 0;
 		}
 	}
 	err_ = 0;
+	co_return 0;
 }
 
-void cmd::handle_get(
+trt::CoroTask cmd::handle_get(
 	udepot::ConnectionBase &con,
 	KV_MbuffInterface &kv,
 	udepot::MbuffCacheBase &mb_cache,
 	udepot::Mbuff &val_mbuff,
 	udepot::Mbuff &key_mbuff)
 {
-	if (3 < ntokens_)
-		return handle_multiget(con, kv, mb_cache, val_mbuff, key_mbuff);
+	if (3 < ntokens_) {
+		co_await handle_multiget(con, kv, mb_cache, val_mbuff, key_mbuff);
+		co_return 0;
+	}
 	do {
 		const token *const key = &tokens_[parser::KEY_TOKEN];
 		u32 tot_iov_len = 0, tot_iov_lenb = 0;
 		size_t lenk = 0, lenv = 0, lenkb = 0, lenvb = 0;
-		int rc = handle_single_kv_get(kv, key, key_mbuff, val_mbuff, lenk, lenv, lenkb, lenvb);
+		int rc = (int)(co_await handle_single_kv_get(kv, key, key_mbuff, val_mbuff, lenk, lenv, lenkb, lenvb));
 		if (0 != rc)
 			break;
 		tot_iov_len += lenk + lenv;
@@ -361,8 +364,8 @@ void cmd::handle_get(
 		assert(strlen(end_get_rsp_msg_) == copied);
 		tot_iov_lenb += copied;
 
-		struct iovec iov[tot_iov_len], *iovp = &iov[0];
-		memset(iov, 0, sizeof(*iov) * tot_iov_len);
+		std::vector<struct iovec> iov_storage(tot_iov_len);
+		struct iovec *iov = iov_storage.data(), *iovp = iov;
 		size_t iov_len = tot_iov_len;
 		size_t iov_lenb = 0;
 		int err;
@@ -394,19 +397,20 @@ void cmd::handle_get(
 		assert(n == (ssize_t) tot_iov_lenb);
 
 		err_ = 0;
-		return;
+		co_return 0;
 	} while (0);
 
 	// handle case where we didn't find the key, or failed to retrieve it
 	// send END msg and stop
 	const u32 len = strlen(end_get_rsp_msg_);
-	const ssize_t n = con.send(end_get_rsp_msg_, len, 0);
-	if (len != n) {
+	const ssize_t n = (ssize_t)(co_await con.send(end_get_rsp_msg_, len, 0));
+	if ((u32)n != len) {
 		UDEPOT_ERR("send resp %s for cmd %s failed with %s %d n=%ld.",
 			end_get_rsp_msg_, mc_req_strs[req_], strerror(errno), errno, n);
 		rsp_ = RSP_SERVER_ERROR;
-		return handle_rsp(con);
+		co_await handle_rsp(con);
 	}
+	co_return 0;
 }
 
 /*
@@ -470,7 +474,7 @@ void cmd::handle_get(
  - "NOT_FOUND\r\n" to indicate that the item you are trying to store
  with a "cas" command did not exist.
  */
-void cmd::handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::Mbuff &mbuff)
+trt::CoroTask cmd::handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::Mbuff &mbuff)
 {
 	size_t msg_size = vlen_ + strlen(delimiter_);
 	size_t prefix_size = kv.putKeyvalPrefixSize();
@@ -487,7 +491,7 @@ void cmd::handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepo
 	if (mbuff.get_free_size() < mbuff_size) {
 		UDEPOT_ERR("recv for req %s failed to allocate buffer.", mc_req_strs[req_]);
 		err_ = ENOMEM;
-		return;
+		co_return 0;
 	}
 	// leave space for prefix
 	mbuff.append_uninitialized(prefix_size);
@@ -503,13 +507,13 @@ void cmd::handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepo
 	if (0 != err) {
 		UDEPOT_ERR("recv for req %s failed with %s %d.", mc_req_strs[req_], strerror(err), err);
 		err_ = err;
-		return;
+		co_return 0;
 	}
 	if ('\r' != mbuff.read_val<char>(prefix_size + key.length + vlen_) ||
 		'\n' != mbuff.read_val<char>(prefix_size + key.length + vlen_ + 1)) {
 		UDEPOT_ERR("Invalid data format did not find \r\n at the end.");
 		rsp_ = RSP_CLIENT_ERROR_BAD_DATA_CHUNK;
-		return;
+		co_return 0;
 	}
 	mbuff.reslice(key.length + vlen_, prefix_size);
 	switch(req_) {
@@ -526,12 +530,12 @@ void cmd::handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepo
 		// clear space for prefix, so that put() can do prepend()
 		mbuff.reslice(store_size); // TODO: figure out if this should be store_size - prefix_size instead
 		if (REQ_SET == req_)
-			err = kv.put(mbuff, key.length);
+			err = (int)(co_await kv.put(mbuff, key.length));
 		else {
 			const KV_MbuffInterface::PutOp op = REQ_ADD == req_ ?
 				KV_MbuffInterface::CREATE : KV_MbuffInterface::REPLACE;
 			assert(REQ_REPLACE == req_ || REQ_ADD == req_);
-			err = kv.put(mbuff, key.length, op);
+			err = (int)(co_await kv.put(mbuff, key.length, op));
 		}
 		if (0 == err) {
 			rsp_ = RSP_STORED; // return success msg to user
@@ -542,7 +546,7 @@ void cmd::handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepo
 				kv.mbuff_add_buffers(keymb, key.length);
 				keymb.append_from_buffer(key.value, key.length);
 				mbuff.reslice(0);
-				int rc = kv.get(keymb, mbuff);
+				int rc = (int)(co_await kv.get(keymb, mbuff));
 				assert(0 == rc);
 				u32 flags_verify = 0;
 				mbuff.copy_to_buffer(mbuff.get_valid_size() - sizeof(flags_verify),
@@ -587,7 +591,7 @@ void cmd::handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepo
 				UDEPOT_ERR("get for req %s failed to copy key buffer.", mc_req_strs[req_]);
 				break;
 			}
-			int rc = kv_get_for_mc(kv, keymb, oldvalmb);
+			int rc = (int)(co_await kv_get_for_mc(kv, keymb, oldvalmb));
 			if (0 != rc) {
 				UDEPOT_ERR("kv get for req %s failed with %s %d.", mc_req_strs[req_], strerror(rc), rc);
 				break;
@@ -604,7 +608,7 @@ void cmd::handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepo
 					UDEPOT_ERR("get for req %s failed to copy key buffer.", mc_req_strs[req_]);
 					break;
 				}
-				rc = kv.put(mbuff, key.length);
+				rc = (int)(co_await kv.put(mbuff, key.length));
 				if (0 != rc)
 					UDEPOT_ERR("kv put for req %s failed with %s %d.", mc_req_strs[req_], strerror(rc), rc);
 			} else {
@@ -630,7 +634,7 @@ void cmd::handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepo
 				copied = oldvalmb.prepend_from_buffer(key.value, key.length);
 				assert(copied == key.length);
 				// assert(prefix_size <= oldvalmb.get_free_size());
-				rc = kv.put(oldvalmb, key.length);
+				rc = (int)(co_await kv.put(oldvalmb, key.length));
 				if (0 != rc)
 					UDEPOT_ERR("kv put for req %s failed with %s %d.", mc_req_strs[req_], strerror(rc), rc);
 			}
@@ -647,6 +651,7 @@ void cmd::handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepo
 		break;
 	}
 	err_ = 0;
+	co_return 0;
 }
 
 
@@ -696,7 +701,7 @@ guaranteed to decrement its returned length.  The number MAY be
 space-padded at the end, but this is purely an implementation
 optimization, so you also shouldn't rely on that.
  */
-void cmd::handle_arithmetic_cmd(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::Mbuff &mbuff)
+trt::CoroTask cmd::handle_arithmetic_cmd(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::Mbuff &mbuff)
 {
 	const token &key = tokens_[parser::KEY_TOKEN];
 	size_t prefix_size = kv.putKeyvalPrefixSize();
@@ -710,7 +715,7 @@ void cmd::handle_arithmetic_cmd(udepot::ConnectionBase &con, KV_MbuffInterface &
 	if (mbuff.get_free_size() < store_size) {
 		UDEPOT_ERR("recv for req %s failed to allocate buffer.", mc_req_strs[req_]);
 		err_ = ENOMEM;
-		return;
+		co_return 0;
 	}
 	// append key
 	size_t copied __attribute__((unused)) = mbuff.append_from_buffer(key.value, key.length);
@@ -719,7 +724,7 @@ void cmd::handle_arithmetic_cmd(udepot::ConnectionBase &con, KV_MbuffInterface &
 
 	udepot::Mbuff oldvalmb(kv.mbuff_type_index());
 	do {
-		int rc = kv_get_for_mc(kv, mbuff, oldvalmb);
+		int rc = (int)(co_await kv_get_for_mc(kv, mbuff, oldvalmb));
 		if (0 != rc) {
 			UDEPOT_ERR("kv get for req %s failed with %s %d.", mc_req_strs[req_], strerror(rc), rc);
 			rsp_ = RSP_NOT_FOUND;
@@ -754,34 +759,35 @@ void cmd::handle_arithmetic_cmd(udepot::ConnectionBase &con, KV_MbuffInterface &
 		}
 		mbuff.reslice(0);
 		mbuff.append_uninitialized(prefix_size);
-		size_t copied __attribute__((unused)) = mbuff.append_from_buffer(key.value, key.length);
-		assert(copied == key.length);
-		copied = mbuff.append_from_buffer(msg, len - 2);
-		assert(len - 2 == (s64) copied);
-		copied = mbuff.append_from_mbuff(oldvalmb, oldvalmb.get_valid_size() -
+		size_t copied2 __attribute__((unused)) = mbuff.append_from_buffer(key.value, key.length);
+		assert(copied2 == key.length);
+		copied2 = mbuff.append_from_buffer(msg, len - 2);
+		assert(len - 2 == (s64) copied2);
+		copied2 = mbuff.append_from_mbuff(oldvalmb, oldvalmb.get_valid_size() -
 						sizeof(flags_) - sizeof(expiry_),
 						sizeof(flags_) + sizeof(expiry_));
-		assert(sizeof(flags_) + sizeof(expiry_) == copied);
+		assert(sizeof(flags_) + sizeof(expiry_) == copied2);
 		mbuff.reslice(key.length + len - 2 + sizeof(flags_) + sizeof(expiry_), prefix_size);
-		rc = kv.put(mbuff, key.length);
+		rc = (int)(co_await kv.put(mbuff, key.length));
 		if (0 != rc) {
 			UDEPOT_ERR("kv put for req %s failed with %s %d.", mc_req_strs[req_], strerror(rc), rc);
 			break;
 		}
 		if (unlikely(noreply_))
 			break;
-		const ssize_t n = con.send(msg, len, 0);
-		if (len != n) {
+		const ssize_t n = (ssize_t)(co_await con.send(msg, len, 0));
+		if ((u32)n != len) {
 			UDEPOT_ERR("send resp %s for cmd %s failed with %s %d n=%ld.",
 				end_get_rsp_msg_, mc_req_strs[req_], strerror(errno), errno, n);
 			break;
 		}
 		kv.mbuff_free_buffers(oldvalmb);
-		return;
+		co_return 0;
 	} while (0);
 	kv.mbuff_free_buffers(oldvalmb);
 	if (!noreply_)
-		handle_rsp(con);
+		co_await handle_rsp(con);
+	co_return 0;
 }
 
 /*
@@ -819,7 +825,7 @@ END\r\n
 
  * only send bytes stat for now
  */
-void cmd::handle_stats_cmd(
+trt::CoroTask cmd::handle_stats_cmd(
 	udepot::ConnectionBase &con,
 	KV_MbuffInterface &kv,
 	udepot::Mbuff &mbuff)
@@ -833,14 +839,15 @@ void cmd::handle_stats_cmd(
 		n = strlen("STAT bytes 0\r\nEND\r\n");
 		strncpy(msg, "STAT bytes 0\r\nEND\r\n", sizeof(msg));
 	}
-	const ssize_t send_nr = con.send(msg, n, 0);
+	const ssize_t send_nr = (ssize_t)(co_await con.send(msg, n, 0));
 	if (send_nr != n) {
 		UDEPOT_ERR("sendmsg for req %s failed with %s %d.",
 			mc_req_strs[req_], strerror(errno), errno);
 	}
+	co_return 0;
 }
 
-void cmd::handle_rsp(udepot::ConnectionBase &con)
+trt::CoroTask cmd::handle_rsp(udepot::ConnectionBase &con)
 {
 	// response
 	const char *rspstr = nullptr;
@@ -899,15 +906,16 @@ void cmd::handle_rsp(udepot::ConnectionBase &con)
 	assert(nullptr != rspstr);
 	const u32 len = strlen(rspstr);
 	UDEPOT_DBG("sending resp %s for cmd %s.", rspstr, mc_req_strs[req_]);
-	const ssize_t n = con.send(rspstr, len, 0);
-	if (len != n) {
+	const ssize_t n = (ssize_t)(co_await con.send(rspstr, len, 0));
+	if ((u32)n != len) {
 		UDEPOT_ERR("send resp %s for cmd %s failed with %s %d n=%ld.",
 			rspstr, mc_req_strs[req_], strerror(errno), errno, n);
 		err_ = ECONNRESET;
 	}
+	co_return 0;
 }
 
-void cmd::handle(
+trt::CoroTask cmd::handle(
 	udepot::ConnectionBase &con,
 	KV_MbuffInterface &kv,
 	udepot::MbuffCacheBase &mb_cache,
@@ -918,26 +926,29 @@ void cmd::handle(
 	switch (req_) {
 	case REQ_GET:
 	case REQ_GETS:
-		return handle_get(con, kv, mb_cache, mbuff, keymbuff);
+		co_await handle_get(con, kv, mb_cache, mbuff, keymbuff);
+		co_return 0;
 	case REQ_SET:
 	case REQ_ADD:
 	case REQ_REPLACE:
 	case REQ_APPEND:
 	case REQ_PREPEND:
-		handle_store(con, kv, mbuff);
+		co_await handle_store(con, kv, mbuff);
 		if (unlikely(noreply_))
-			return;	// user asked not to send them a reply
+			co_return 0;
 		break;
 	case REQ_QUIT:
 		err_ = ECONNRESET;
-		return;
+		co_return 0;
 	case REQ_INCR:
 	case REQ_DECR:
-		return handle_arithmetic_cmd(con, kv, mbuff); // handles reply internally
+		co_await handle_arithmetic_cmd(con, kv, mbuff);
+		co_return 0;
 	case REQ_CAS:
 	case REQ_DEL:
 	case REQ_STATS:
-		return handle_stats_cmd(con, kv, mbuff); // handles reply internally
+		co_await handle_stats_cmd(con, kv, mbuff);
+		co_return 0;
 	case REQ_VERSION:
 	case REQ_FLUSH_ALL:
 	case REQ_WATCH:
@@ -956,7 +967,8 @@ void cmd::handle(
 		break;
 	}
 
-	handle_rsp(con);
+	co_await handle_rsp(con);
+	co_return 0;
 }
 
 int parser::start(void)
@@ -969,21 +981,20 @@ void parser::stop(void)
 	mc_timer_g.stop();
 }
 
-cmd parser::read_cmd(udepot::ConnectionBase &con, msg_buff &buff)
+trt::CoroTask parser::read_cmd(udepot::ConnectionBase &con, msg_buff &buff, cmd &cmd_out)
 {
 	int rc = 0;
-	cmd cmd(buff);
-	cmd.err_ = 0;
+	cmd_out.err_ = 0;
 	do {
 		rc = buff.add_free_size(read_cmd_chunk);
 		if (unlikely(0 != rc)) {
 			UDEPOT_ERR("failed to allocate buff.");
-			cmd.err_ = ENOMEM;
+			cmd_out.err_ = ENOMEM;
 			break;
 		}
-		ssize_t n = con.recv(buff.p_ + buff.rb_, read_cmd_chunk, 0);
+		ssize_t n = (ssize_t)(co_await con.recv(buff.p_ + buff.rb_, read_cmd_chunk, 0));
 		if (0 == n) {
-			cmd.err_ = ECONNRESET;
+			cmd_out.err_ = ECONNRESET;
 			break;
 		}
 		if (n < 0) {
@@ -996,18 +1007,18 @@ cmd parser::read_cmd(udepot::ConnectionBase &con, msg_buff &buff)
 				continue;
 			} else if (ECONNRESET == errno) {
 				UDEPOT_DBG("read returned error %s %d", strerror(errno), errno);
-				cmd.err_ = errno;
+				cmd_out.err_ = errno;
 				break;
 			} else {
 				UDEPOT_ERR("read returned error %s %d", strerror(errno), errno);
-				cmd.err_ = errno;
+				cmd_out.err_ = errno;
 				break;
 			}
 		}
 		buff.rb_ += static_cast<u32>(n);
 		assert(buff.rb_ <= buff.ab_);
 
-		rc = try_parse_command(cmd);
+		rc = try_parse_command(cmd_out);
 		if (0 != rc) {
 			if (EAGAIN == rc)
 				continue;
@@ -1015,11 +1026,11 @@ cmd parser::read_cmd(udepot::ConnectionBase &con, msg_buff &buff)
 			break;
 		}
 		// buf.pos_ points to the first byte after the \r\n of the cmd header
-		parse(cmd);
+		parse(cmd_out);
 
 	} while (EAGAIN == rc);
 
-	return cmd;
+	co_return 0;
 }
 
 // Part of the code below is from the memcache github master branch,

@@ -17,6 +17,7 @@
 #include <atomic>
 #include <memory> //shared_ptr
 #include <pthread.h>
+#include "trt/uapi/trt.hh"
 
 #include "util/types.h"
 #include "util/debug.h"
@@ -224,12 +225,19 @@ public:
 		he->purge();
 	}
 
-	void lock(const u64 h) {
+	trt::CoroTask lock(const u64 h) {
 		uDepotLock *sl1, *sl2;
 		lock_common(h, &sl1, &sl2);
-		sl1->lock();
+		co_await sl1->lock();
 		if (nullptr != sl2)
-			sl2->lock();
+			co_await sl2->lock();
+	}
+	void lock_blocking(const u64 h) {
+		uDepotLock *sl1, *sl2;
+		lock_common(h, &sl1, &sl2);
+		sl1->lock_blocking();
+		if (nullptr != sl2)
+			sl2->lock_blocking();
 	}
 	void unlock(const u64 h) {
 		uDepotLock *sl1, *sl2;
@@ -238,10 +246,10 @@ public:
 			sl2->unlock();
 		sl1->unlock();
 	}
-	void lock(uDepotLock *const sl1, uDepotLock *const sl2) {
-		sl1->lock();
+	trt::CoroTask lock(uDepotLock *const sl1, uDepotLock *const sl2) {
+		co_await sl1->lock();
 		if (nullptr != sl2)
-			sl2->lock();
+			co_await sl2->lock();
 	}
 	void unlock(uDepotLock *const sl1, uDepotLock *const sl2) {
 		if (nullptr != sl2)

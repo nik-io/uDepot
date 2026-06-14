@@ -23,25 +23,28 @@ namespace udepot {
 struct SpdkNativeNYI : public RteAlloc<512> {
 	using Ptr = RteAlloc<512>::Ptr;
 
-	ssize_t pread_native(Ptr buff, size_t len, off_t off) {
+	trt::CoroTask pread_native(Ptr buff, size_t len, off_t off) {
 		UDEPOT_ERR("%s:%d: NYI!", __PRETTY_FUNCTION__, __LINE__);
 		abort();
+		co_return (trt::RetT)-1;
 	}
 
-	ssize_t pwrite_native(Ptr buff, size_t len, off_t off) {
+	trt::CoroTask pwrite_native(Ptr buff, size_t len, off_t off) {
 		UDEPOT_ERR("%s:%d: NYI!", __PRETTY_FUNCTION__, __LINE__);
 		abort();
+		co_return (trt::RetT)-1;
 	}
 
-	// error is returned as negative number
-	ssize_t preadv_native(IoVec<Ptr>  iov, off_t off) {
+	trt::CoroTask preadv_native(IoVec<Ptr>  iov, off_t off) {
 		UDEPOT_ERR("%s:%d: NYI!", __PRETTY_FUNCTION__, __LINE__);
 		abort();
+		co_return (trt::RetT)-1;
 	}
 
-	ssize_t pwritev_native(IoVec<Ptr> iov, off_t off) {
+	trt::CoroTask pwritev_native(IoVec<Ptr> iov, off_t off) {
 		UDEPOT_ERR("%s:%d: NYI!", __PRETTY_FUNCTION__, __LINE__);
 		abort();
+		co_return (trt::RetT)-1;
 	}
 };
 

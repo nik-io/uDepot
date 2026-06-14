@@ -58,37 +58,37 @@ public:
 	ConnectionTrtEpoll(ConnectionTrtEpoll const&) = delete;
 	void operator=(ConnectionTrtEpoll const&) = delete;
 
-	virtual ssize_t send(const void *buff, size_t len, int flags) override final {
-		const ssize_t n = trt::Epoll::send(fd_, buff, len, flags);
+	virtual trt::CoroTask send(const void *buff, size_t len, int flags) override final {
+		const ssize_t n = (ssize_t)(co_await trt::Epoll::send(fd_, buff, len, flags));
 		#if !defined(NDEBUG)
                 if (0 < n)
                         send_bytes_.fetch_add(static_cast<size_t>(n), std::memory_order_relaxed);
 		#endif
-                return n;
+                co_return (trt::RetT)n;
 	}
-	virtual ssize_t recv(void *buff, size_t len, int flags) override final {
-		const ssize_t n = trt::Epoll::recv(fd_, buff, len, flags);
+	virtual trt::CoroTask recv(void *buff, size_t len, int flags) override final {
+		const ssize_t n = (ssize_t)(co_await trt::Epoll::recv(fd_, buff, len, flags));
 		#if !defined(NDEBUG)
                 if (0 < n)
                         recv_bytes_.fetch_add(static_cast<size_t>(n), std::memory_order_relaxed);
 		#endif
-                return n;
+                co_return (trt::RetT)n;
 	}
-	virtual ssize_t sendmsg(const struct msghdr *msg, int flags) override final {
-		const ssize_t n = trt::Epoll::sendmsg(fd_, msg, flags);
+	virtual trt::CoroTask sendmsg(const struct msghdr *msg, int flags) override final {
+		const ssize_t n = (ssize_t)(co_await trt::Epoll::sendmsg(fd_, msg, flags));
 		#if !defined(NDEBUG)
                 if (0 < n)
                         send_bytes_.fetch_add(static_cast<size_t>(n), std::memory_order_relaxed);
 		#endif
-                return n;
+                co_return (trt::RetT)n;
 	}
-	virtual ssize_t recvmsg(struct msghdr *msg, int flags) override final {
-		const ssize_t n = trt::Epoll::recvmsg(fd_, msg, flags);
+	virtual trt::CoroTask recvmsg(struct msghdr *msg, int flags) override final {
+		const ssize_t n = (ssize_t)(co_await trt::Epoll::recvmsg(fd_, msg, flags));
 		#if !defined(NDEBUG)
                 if (0 < n)
                         recv_bytes_.fetch_add(static_cast<size_t>(n), std::memory_order_relaxed);
 		#endif
-                return n;
+                co_return (trt::RetT)n;
 	}
 
 private:
@@ -168,7 +168,7 @@ int MemcacheTrtNet::global_exit(void)
 //
 
 
-static void *
+static trt::CoroTask
 task_serve_mc_request(void *arg)
 {
 	int cfd = (int)(uintptr_t)arg;
@@ -181,7 +181,7 @@ task_serve_mc_request(void *arg)
 			break;
 		// if this happens too often, something's wrong. have a message for now
 		UDEPOT_MSG("Cannot get McTaskArg. Yielding");
-		trt::T::yield();
+		co_await trt::T::yield();
 	}
 
 	ConnectionTrtEpoll scon(cfd);
@@ -201,16 +201,17 @@ task_serve_mc_request(void *arg)
 		buff.reset();
 		mbuff.reslice(0);
 
-		memcache::cmd cmd = memcache::parser::read_cmd(scon, buff);
+		memcache::cmd cmd(buff);
+		co_await memcache::parser::read_cmd(scon, buff, cmd);
 		if (0 == cmd.err_) {
-			cmd.handle(scon, targ->srv_kv, targ->srv_mb_cache, mbuff, keymbuff);
+			co_await cmd.handle(scon, targ->srv_kv, targ->srv_mb_cache, mbuff, keymbuff);
 			if (0 == cmd.err_)
 				continue;
 		}
 
 		// only if error either at read_cmd, or handle
 		if (ENOMEM == cmd.err_) {
-			trt::T::yield();
+			co_await trt::T::yield();
 			continue;
 		}
 		if (ECONNRESET == cmd.err_)
@@ -230,10 +231,10 @@ task_serve_mc_request(void *arg)
 	// return the McTaskArg in the pool
 	McTaskArgPool_g->put_arg(targ);
 
-	return nullptr;
+	co_return 0;
 }
 
-static void *
+static trt::CoroTask
 task_mc_accept(void *arg)
 {
 	const int fd = (int) (uintptr_t) arg;
@@ -242,7 +243,7 @@ task_mc_accept(void *arg)
 		struct sockaddr cli_addr;
 		socklen_t cli_addr_len;
 		UDEPOT_DBG("accept");
-		int afd = trt::Epoll::accept_ll(fd, &cli_addr, &cli_addr_len);
+		int afd = (int)(co_await trt::Epoll::accept_ll(fd, &cli_addr, &cli_addr_len));
 		UDEPOT_DBG("accept returned: %d", afd);
 		if (afd == -1) {
 			// if we are shutting down, we will get a -1 here eith an errno of
@@ -250,7 +251,7 @@ task_mc_accept(void *arg)
 			// other cases (different errors) where we want to re-try. For now,
 			// we allways return.
 			UDEPOT_MSG("accept_ll: returned %d (%s). Exiting loop\n", errno, strerror(errno));
-			return nullptr;
+			co_return 0;
 		}
 
 		const int optval = 1;
@@ -266,7 +267,7 @@ task_mc_accept(void *arg)
 					trt::Epoll::SpawnPolicy::Distribute);
 	}
 
-	return nullptr;
+	co_return 0;
 }
 
 // MemcacheTrtServer::Conf

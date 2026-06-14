@@ -12,22 +12,19 @@
 #ifndef UDEPOT_NET_SERVE_KV_REQUEST_H__
 #define UDEPOT_NET_SERVE_KV_REQUEST_H__
 
+#include "trt/uapi/trt.hh"
 #include "uDepot/kv-wire.hh"
 #include "kv-mbuff.hh"
 #include "uDepot/net/connection.hh"
 
 namespace udepot {
 
-// Serve a KV request
-// Returns:
-//   0   -> if request was served normally
-// error -> if there was an error.
-//
-// If the client closed the connection (e.g., recv() returned 0)
-// ECONNRESET is returned so that the caller can close the socket, etc.
-int serve_kv_request(ConnectionBase &cli,
-                     KV_MbuffInterface &kv,
-                     Mbuff &req_body, Mbuff &result);
+// Serve a KV request — returns error code via co_return.
+// co_return 0   -> request served normally
+// co_return err -> error (ECONNRESET means client closed connection)
+trt::CoroTask serve_kv_request(ConnectionBase &cli,
+                               KV_MbuffInterface &kv,
+                               Mbuff &req_body, Mbuff &result);
 
 } // end namespace udepot
 

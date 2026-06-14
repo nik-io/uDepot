@@ -21,17 +21,18 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
+#include "trt/uapi/trt.hh"
 
 namespace udepot {
 
 class Mbuff;
 
 struct ConnectionBase {
-	// send(2) / recv(2) et al. semantics
-	virtual ssize_t send(const void *buf, size_t len, int flags) = 0;
-	virtual ssize_t recv(void *buf, size_t len, int flags) = 0;
-	virtual ssize_t sendmsg(const struct msghdr *msg, int flags) = 0;
-	virtual ssize_t recvmsg(struct msghdr *msg, int flags) = 0;
+	// send(2) / recv(2) et al. semantics — co_await these in coroutine callers
+	virtual trt::CoroTask send(const void *buf, size_t len, int flags) = 0;
+	virtual trt::CoroTask recv(void *buf, size_t len, int flags) = 0;
+	virtual trt::CoroTask sendmsg(const struct msghdr *msg, int flags) = 0;
+	virtual trt::CoroTask recvmsg(struct msghdr *msg, int flags) = 0;
 	virtual ~ConnectionBase() {};
 
 	// Deal with partially-succesfull recv() calls
@@ -82,17 +83,17 @@ public:
 	ConnectionSocket(ConnectionSocket const&) = delete;
 	void operator=(ConnectionSocket const&) = delete;
 
-	virtual ssize_t send(const void *buff, size_t len, int flags) override final {
-		return ::send(fd_, buff, len, flags);
+	trt::CoroTask send(const void *buff, size_t len, int flags) override final {
+		co_return (trt::RetT)::send(fd_, buff, len, flags);
 	}
-	virtual ssize_t recv(void *buff, size_t len, int flags) override final {
-		return ::recv(fd_, buff, len, flags);
+	trt::CoroTask recv(void *buff, size_t len, int flags) override final {
+		co_return (trt::RetT)::recv(fd_, buff, len, flags);
 	}
-	virtual ssize_t sendmsg(const struct msghdr *msg, int flags) override final {
-		return ::sendmsg(fd_, msg, flags);
+	trt::CoroTask sendmsg(const struct msghdr *msg, int flags) override final {
+		co_return (trt::RetT)::sendmsg(fd_, msg, flags);
 	}
-	virtual ssize_t recvmsg(struct msghdr *msg, int flags) override final {
-		return ::recvmsg(fd_, msg, flags);
+	trt::CoroTask recvmsg(struct msghdr *msg, int flags) override final {
+		co_return (trt::RetT)::recvmsg(fd_, msg, flags);
 	}
 private:
 	int fd_;

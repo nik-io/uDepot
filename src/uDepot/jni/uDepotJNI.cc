@@ -152,7 +152,7 @@ JNIEXPORT jint JNICALL Java_com_ibm_udepot_uDepotJNI_get
 
 	DBG("key=%02x key-size=%ld.\n", (unsigned char)key_m[0], key_size);
 	size_t val_size_read, val_kv_size;
-	err = KV->get(key_m, key_size, val_m, val_size, val_size_read, val_kv_size);
+	err = (jint)KV->get(key_m, key_size, val_m, val_size, val_size_read, val_kv_size).run_sync();
 
 	// TODO: deal properly with val_kv_size and val_size_read
 	if (!err && (val_kv_size   > static_cast<size_t>(val_size) ||
@@ -186,7 +186,7 @@ JNIEXPORT jint JNICALL Java_com_ibm_udepot_uDepotJNI_put
 	const char *const val_m = reinterpret_cast<const char *>(val_ba);
 
 	DBG("key=%02x val=%02x key-size=%ld val-size=%ld.\n", (unsigned char)key_m[0], (unsigned char) val_m[0], key_size, val_size);
-	err = KV->put(key_m, key_size, val_m, val_size);
+	err = (jint)KV->put(key_m, key_size, val_m, val_size).run_sync();
 
 	env->ReleasePrimitiveArrayCritical(val, val_ba, 0);
 	env->ReleasePrimitiveArrayCritical(key, key_ba, 0);
@@ -204,7 +204,7 @@ JNIEXPORT jint JNICALL Java_com_ibm_udepot_uDepotJNI_del
 	const char *const key_m = reinterpret_cast<const char *>(key_ba);
 
 	DBG("key=%02x key-size=%ld.\n", (unsigned char)key_m[0], key_size);
-	err = KV->del(key_m, key_size);
+	err = (jint)KV->del(key_m, key_size).run_sync();
 
 	UDEPOT_DBG("key=%02x key-size=%ld.\n", (unsigned char)key_m[0], key_size);
 

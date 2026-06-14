@@ -34,24 +34,24 @@ public:
 	static void thread_exit() { }
 
 	using Ptr = IoBuffMemalign<4096>::Ptr;
-	ssize_t pread_native(Ptr buff, size_t len, off_t off) {
-		return ::pread(fd_m, buff.ptr_m, len, off);
+	trt::CoroTask pread_native(Ptr buff, size_t len, off_t off) {
+		co_return (trt::RetT)::pread(fd_m, buff.ptr_m, len, off);
 	}
 
 	void *mmap(void *addr, size_t len, int prot, int flags, off_t off) override {
 		return ::mmap(addr, len, prot, flags, fd_m, off);
 	}
 
-	ssize_t pwrite_native(Ptr buff, size_t len, off_t off) {
-		return ::pread(fd_m, buff.ptr_m, len, off);
+	trt::CoroTask pwrite_native(Ptr buff, size_t len, off_t off) {
+		co_return (trt::RetT)::pwrite(fd_m, buff.ptr_m, len, off);
 	}
 
-	ssize_t preadv_native(IoVec<Ptr> iov, off_t off) {
-		return ::preadv(fd_m, iov.iov_m, iov.iov_cnt_m, off);
+	trt::CoroTask preadv_native(IoVec<Ptr> iov, off_t off) {
+		co_return (trt::RetT)::preadv(fd_m, iov.iov_m, iov.iov_cnt_m, off);
 	}
 
-	ssize_t pwritev_native(IoVec<Ptr> iov, off_t off) {
-		return ::pwritev(fd_m, iov.iov_m, iov.iov_cnt_m, off);
+	trt::CoroTask pwritev_native(IoVec<Ptr> iov, off_t off) {
+		co_return (trt::RetT)::pwritev(fd_m, iov.iov_m, iov.iov_cnt_m, off);
 	}
 
 private:

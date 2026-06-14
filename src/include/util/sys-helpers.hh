@@ -14,8 +14,9 @@
 
 #include <type_traits> // is_standard_layout
 #include <cstring>
-
-#include "uDepot/net/connection.hh"
+#include <sys/socket.h>
+#include <cerrno>
+#include <tuple>
 
 // system helpers:
 //  - recv_full() and send_full() that handle partial success of recv()/send()
@@ -39,8 +40,16 @@ template<>
 inline std::tuple<int, size_t>
 recv_full<void>(int fd, void *buff, size_t buff_size, int flags)
 {
-	udepot::ConnectionSocket sock(fd);
-	return sock.recv_full(buff, buff_size, flags);
+	ssize_t ret = 0;
+	size_t data_read = 0;
+	char *b = static_cast<char *>(buff);
+	while (data_read != buff_size) {
+		ret = ::recv(fd, b + data_read, buff_size - data_read, flags);
+		if (ret < 0) break;
+		if (ret == 0) { ret = -1; errno = ECONNRESET; break; }
+		data_read += ret;
+	}
+	return std::make_tuple(ret < 0 ? -1 : 0, data_read);
 }
 
 template<typename T>
@@ -58,8 +67,15 @@ template<>
 inline std::tuple<int, size_t>
 send_full<const void>(int fd, const void *buff, size_t buff_size, int flags)
 {
-	udepot::ConnectionSocket sock(fd);
-	return sock.send_full(buff, buff_size, flags);
+	ssize_t ret = 0;
+	size_t data_sent = 0;
+	const char *b = static_cast<const char *>(buff);
+	while (data_sent != buff_size) {
+		ret = ::send(fd, b + data_sent, buff_size - data_sent, flags);
+		if (ret < 0) break;
+		data_sent += ret;
+	}
+	return std::make_tuple(ret < 0 ? -1 : 0, data_sent);
 }
 
 

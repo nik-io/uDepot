@@ -29,7 +29,8 @@ namespace udepot {
 // Abstract base class:
 class uDepotLock {
 public:
-	virtual void lock() = 0;
+	virtual trt::CoroTask lock() = 0;
+	virtual void lock_blocking() = 0;
 	virtual void unlock() = 0;
 
         u32 ref_cnt() const { return ref_cnt_m.load(); }
@@ -51,7 +52,16 @@ public:
 	PthreadLock(PthreadLock const&)   = delete;
 	void operator=(PthreadLock const&) = delete;
 
-	void lock() override {
+	trt::CoroTask lock() override {
+		int ret = pthread_mutex_lock(&lock_m);
+		if (ret != 0) {
+			UDEPOT_ERR("Error taking lock");
+			abort();
+		}
+		co_return 0;
+	}
+
+	void lock_blocking() override {
 		int ret = pthread_mutex_lock(&lock_m);
 		if (ret != 0) {
 			UDEPOT_ERR("Error taking lock");
@@ -75,20 +85,13 @@ public:
 	PthreadSpinLock(PthreadSpinLock const&)   = delete;
 	void operator=(PthreadSpinLock const&) = delete;
 
-	void lock() override {
-		for (;;) {
-			const int ret = pthread_spin_trylock(&lock_m);
-			switch (ret) {
-			case 0:
-				return;
-			case EBUSY:
-				pthread_yield();
-				break;
-			default:
-				UDEPOT_ERR("Error taking lock");
-				abort();
-			}
-		}
+	trt::CoroTask lock() override {
+		pthread_spin_lock(&lock_m);
+		co_return 0;
+	}
+
+	void lock_blocking() override {
+		pthread_spin_lock(&lock_m);
 	}
 
 	void unlock() override {
@@ -111,21 +114,30 @@ public:
 	TrtLock(TrtLock const&)    = delete;
 	void operator=(TrtLock const&) = delete;
 
-	void lock() override {
+	trt::CoroTask lock() override {
 		for (;;) {
 			int ret = pthread_mutex_trylock(&lock_m);
 			switch (ret) {
 				case 0:
-				return;
+				co_return 0;
 
 				case EBUSY:
-				trt::T::yield();
+				co_await trt::T::yield();
 				break;
 
 				default:
 				UDEPOT_ERR("Error taking lock");
 				abort();
 			}
+		}
+	}
+
+	void lock_blocking() override {
+		for (;;) {
+			int ret = pthread_mutex_trylock(&lock_m);
+			if (ret == 0) return;
+			if (ret != EBUSY) { UDEPOT_ERR("Error taking lock"); abort(); }
+			sched_yield();
 		}
 	}
 

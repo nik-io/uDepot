@@ -27,6 +27,7 @@
 #include "util/types.h"
 
 #include "trt_util/io_ptr.hh" // IoPtr, IoVec, etc.
+#include "trt/uapi/trt.hh"    // CoroTask, RetT
 
 /**
  * I/O backend for uDepot
@@ -173,22 +174,23 @@ public:
 	static void thread_init() { }
 	static void thread_exit() { }
 
-	// Native versions are the same with the normal ones
+	// Coroutine native IO — co_await these from TRT task coroutines.
+	// For FileIO (blocking posix), these are trivial coroutines (no suspension).
 	using Ptr = IoBuffMalloc::Ptr;
-	ssize_t pread_native(Ptr buff, size_t len, off_t off) {
-		return pread(buff.ptr_m, len, off);
+	trt::CoroTask pread_native(Ptr buff, size_t len, off_t off) {
+		co_return (trt::RetT)pread(buff.ptr_m, len, off);
 	}
 
-	ssize_t pwrite_native(Ptr buff, size_t len, off_t off) {
-		return pwrite(buff.ptr_m, len, off);
+	trt::CoroTask pwrite_native(Ptr buff, size_t len, off_t off) {
+		co_return (trt::RetT)pwrite(buff.ptr_m, len, off);
 	}
 
-	// error is returned as negative number
-	ssize_t preadv_native(IoVec<Ptr>  iov, off_t off) {
-		return preadv(iov.iov_m, iov.iov_cnt_m, off);
+	// error is returned as negative via co_return
+	trt::CoroTask preadv_native(IoVec<Ptr>  iov, off_t off) {
+		co_return (trt::RetT)preadv(iov.iov_m, iov.iov_cnt_m, off);
 	}
-	ssize_t pwritev_native(IoVec<Ptr> iov, off_t off) {
-		return pwritev(iov.iov_m, iov.iov_cnt_m, off);
+	trt::CoroTask pwritev_native(IoVec<Ptr> iov, off_t off) {
+		co_return (trt::RetT)pwritev(iov.iov_m, iov.iov_cnt_m, off);
 	}
 };
 
