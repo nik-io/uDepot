@@ -33,7 +33,7 @@ endif
 # C-only
 CFLAGS    = $(CFLAGS_) -std=c11
 # C++-only
-CXXFLAGS  = $(CFLAGS_) -std=c++11
+CXXFLAGS  = $(CFLAGS_) -std=c++20
 # linking-related
 LIBS      =  -lpthread -lrt
 LDFLAGS  +=
@@ -174,7 +174,7 @@ jctx_DEP = $(call transform_SRC, $(jctx_SRC),%.d)
 trt_backends_OBJ = $(call transform_SRC, $(trt_backends_SRC),%.o)
 trt_backends_DEP = $(call transform_SRC, $(trt_backends_SRC),%.d)
 
-all_TESTS = $(jctx_TESTS) $(trt_TESTS)
+all_TESTS = $(trt_TESTS)
 ifeq (1, $(BUILD_SPDK))
       CFLAGS_          += -msse4
       all_TESTS        += $(trt_spdk_TESTS)
@@ -183,15 +183,14 @@ ifeq (1, $(BUILD_RDMA))
       all_TESTS   += $(trt_rdma_TESTS)
 endif
 
-all_OBJ   = $(util_OBJ) $(jctx_OBJ) $(trt_OBJ) $(trt_backends_OBJ)
-all_DEP   = $(util_DEP) $(jctx_DEP) $(trt_DEP) $(trt_backends_DEP)
+all_OBJ   = $(util_OBJ) $(trt_OBJ) $(trt_backends_OBJ)
+all_DEP   = $(util_DEP) $(trt_DEP) $(trt_backends_DEP)
 
 all_OBJ  += $(patsubst %,%.o,$(all_TESTS))
 all_DEP  += $(patsubst %,%.d,$(all_TESTS))
 
 # top-level objects (incremental link)
-top_OBJ = $(build_DIR)/jctx.o         \
-	  $(build_DIR)/util.o         \
+top_OBJ = $(build_DIR)/util.o         \
 	  $(build_DIR)/trt-core.o     \
 	  $(build_DIR)/trt-backends.o \
 	  $(build_DIR)/libtrt.o
@@ -215,7 +214,6 @@ all: builddirs $(all_OBJ) $(all_TESTS)
 
 builddirs:
 	[ -d $(build_DIR) ] || mkdir $(build_DIR)
-	[ -d $(build_DIR)/jctx ] || mkdir $(build_DIR)/jctx
 	[ -d $(build_DIR)/trt ] || mkdir $(build_DIR)/trt
 	[ -d $(build_DIR)/trt/uapi ] || mkdir $(build_DIR)/trt/uapi
 	[ -d $(build_DIR)/trt_util ] || mkdir $(build_DIR)/trt_util
@@ -265,7 +263,7 @@ $(build_DIR)/trt-core.o: $(trt_OBJ)
 $(build_DIR)/trt-backends.o: $(trt_backends_OBJ)
 	$(LD) -i $^ -o $@
 
-$(build_DIR)/libtrt.o: $(build_DIR)/trt-core.o $(build_DIR)/trt-backends.o $(build_DIR)/util.o $(build_DIR)/jctx.o
+$(build_DIR)/libtrt.o: $(build_DIR)/trt-core.o $(build_DIR)/trt-backends.o $(build_DIR)/util.o
 	$(LD) -i $^ -o $@
 
 $(build_DIR)/libtrt-rte.o: $(build_DIR)/libtrt.o $(spdk_OBJ)

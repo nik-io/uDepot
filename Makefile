@@ -26,7 +26,7 @@ ifeq (1, $(BUILD_URING))
 endif
 
 CXX        ?= g++
-CXXFLAGS   += -Wall -Werror -std=c++11 $(INCLUDES)
+CXXFLAGS   += -Wall -Werror -std=c++20 $(INCLUDES)
 ifeq (DEBUG,$(BUILD_TYPE))
 CXXFLAGS   += -O0 -ggdb
 else ifeq (NORMAL,$(BUILD_TYPE))
@@ -201,6 +201,8 @@ LIBCITYHASH_CONFIGURE_ARGS+= "--with-pic"
 endif
 
 $(LIBCITYHASH_DIR)/Makefile: $(LIBCITYHASH_DIR)/configure
+	cp /usr/share/misc/config.guess $(LIBCITYHASH_DIR)/config.guess 2>/dev/null || true
+	cp /usr/share/misc/config.sub $(LIBCITYHASH_DIR)/config.sub 2>/dev/null || true
 	cd $(LIBCITYHASH_DIR) && ./configure $(LIBCITYHASH_CONFIGURE_ARGS)
 
 $(LIBCITYHASH_DIR)/src/.libs/libcityhash.a:  $(LIBCITYHASH_DIR)/Makefile
@@ -352,7 +354,7 @@ test/jni/uDepotJNITest.class: $(uDepotJNI_CLASSFILE) $(JNI_TEST_DIR)/uDepotJNITe
 $(JNI_DIR)/%.o: $(JNI_DIR)/%.cc $(uDepotJNI_C_HEADER) Makefile
 	$(CXX) $(CXXFLAGS) $(JNI_CXXFLAGS) -c $< -o $@
 
-$(JNI_DIR)/libuDepotJNI.so: $(JNI_OBJ) Makefile
+$(JNI_DIR)/libuDepotJNI.so: $(JNI_OBJ) $(LIBCITYHASH_LIB) Makefile
 	$(CXX) $(LDFLAGS) $(JNI_LDFLAGS) $(udepot_jni_OBJ) $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) -o $@ $(LIBS)
 
 do_run_test = echo -n "RUNNING TEST: $(1) ... ";           \
