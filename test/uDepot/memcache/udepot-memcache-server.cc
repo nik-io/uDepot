@@ -110,7 +110,7 @@ static udepot::memcache_conf conf_g;
 static std::atomic<bool> exit_g;
 
 // This task will trigger shutdown
-static void *task_exit(void *arg)
+static trt::CoroTask task_exit(void *arg)
 {
 	assert(Trt_g_.kv);
 	if (pthread_self() != Trt_g_.thread_that_called_init) {
@@ -122,7 +122,7 @@ static void *task_exit(void *arg)
 		UDEPOT_MSG("Global exit");
 		Trt_g_.kv->shutdown();
 	}
-	return nullptr;
+	co_return 0;
 }
 
 __attribute__((unused))
@@ -316,7 +316,7 @@ struct t_main_arg {
 static std::atomic<int> exit_trt_g;
 
 static  __attribute__((unused))
-void *t_main(void *arg_in)
+trt::CoroTask t_main(void *arg_in)
 {
 	t_main_arg *const arg = static_cast<t_main_arg *>(arg_in);
 	if (0 == arg->thread_id) {
@@ -345,7 +345,7 @@ void *t_main(void *arg_in)
 	}
 	pthread_barrier_wait(arg->barrier);
 
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>

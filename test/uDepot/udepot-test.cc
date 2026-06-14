@@ -53,7 +53,7 @@ static pthread_barrier_t barrier_g;
 
 struct thread_arg;
 template<typename RT>
-using test_fn = std::function<int (uDepotSalsa<RT> *, u32, u64, u64)>;
+using test_fn = std::function<trt::CoroTask (uDepotSalsa<RT> *, u32, u64, u64)>;
 
 constexpr u64 prime_g = 2654435761UL;
 struct udepot_test_conf : public KV_conf {
@@ -161,54 +161,55 @@ static void destroy_test_data()
 
 template<typename RT>
 __attribute__((optimize("unroll-loops")))
-static int put_test(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
+static trt::CoroTask put_test(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
 {
 	const test_key_value *const tkv_start = &kvs_g[start];
 	const test_key_value *const tkv_end   = &kvs_g[end];
 	UDEPOT_DBG("start=%p (%llu) end=%p (%llu)", tkv_start, (unsigned long long)start, tkv_end, (unsigned long long)end);
 	for (const test_key_value *tkv = tkv_start; tkv < tkv_end; ++tkv) {
-		const int err = KV->put(reinterpret_cast<const char *>(&tkv->key), sizeof(tkv->key), tkv->val, conf_g.kv_val_size_m);
+		const int err = (int)(co_await KV->put(reinterpret_cast<const char *>(&tkv->key), sizeof(tkv->key), tkv->val, conf_g.kv_val_size_m));
 		if (0 != err && EEXIST != err) {
 			UDEPOT_ERR("put returned %d tid=%u key=0x%16lx.", err, tid, tkv->key);
-			return err;
+			co_return (trt::RetT)(int)err;
 		}
 	}
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((optimize("unroll-loops")))
-static int put_rnd_test(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
+static trt::CoroTask put_rnd_test(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
 {
 	for (u64 i = start; i < end; ++i) {
 		const u32 idx = lrand48() % (end - start);
 		const test_key_value *tkv = &kvs_g[idx];
-		const int err = KV->put(reinterpret_cast<const char *>(&tkv->key), sizeof(tkv->key), tkv->val, conf_g.kv_val_size_m);
+		const int err = (int)(co_await KV->put(reinterpret_cast<const char *>(&tkv->key), sizeof(tkv->key), tkv->val, conf_g.kv_val_size_m));
 		if (0 != err && EEXIST != err) {
 			UDEPOT_ERR("put returned %d tid=%u key=0x%16lx.", err, tid, tkv->key);
-			return err;
+			co_return (trt::RetT)(int)err;
 		}
 	}
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((optimize("unroll-loops")))
-static int get_test(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
+static trt::CoroTask get_test(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
 {
 	const test_key_value *const tkv_start = &kvs_g[start];
 	const test_key_value *const tkv_end   = &kvs_g[end];
 	char *const val_out = (char *) malloc(conf_g.kv_val_size_m);
 	if (nullptr == val_out)
-		return ENOMEM;
+		co_return (trt::RetT)(int)ENOMEM;
 	for (const test_key_value *tkv = tkv_start; tkv < tkv_end; ++tkv) {
 		size_t val_size_read, val_size;
-		const int err = KV->get(
+		const int err = (int)(co_await KV->get(
 			reinterpret_cast<const char *>(&tkv->key),sizeof(tkv->key),
 			val_out, conf_g.kv_val_size_m,
-			val_size_read, val_size);
+			val_size_read, val_size));
 		if (0 != err) {
 			UDEPOT_ERR("get returned %d (%s).", err, strerror(err));
+			free(val_out);
 			abort();
 		}
 		assert(val_size_read == conf_g.kv_val_size_m);
@@ -216,43 +217,43 @@ static int get_test(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, c
 		assert(0 == memcmp(val_out, tkv->val, conf_g.kv_val_size_m));
 	}
 	free(val_out);
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((optimize("unroll-loops")))
-static int del_test(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
+static trt::CoroTask del_test(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
 {
 	const test_key_value *const tkv_start = &kvs_g[start];
 	const test_key_value *const tkv_end   = &kvs_g[end];
 	for (const test_key_value *tkv = tkv_start; tkv < tkv_end; ++tkv) {
-		const int err = KV->del(reinterpret_cast<const char *>(&tkv->key), sizeof(tkv->key));
+		const int err = (int)(co_await KV->del(reinterpret_cast<const char *>(&tkv->key), sizeof(tkv->key)));
 		if (0 != err) {
 			UDEPOT_ERR("put returned %d tid=%u key=0x%16lx.", err, tid, tkv->key);
-			return err;
+			co_return (trt::RetT)(int)err;
 		}
 	}
 	for (const test_key_value *tkv = tkv_start; tkv < tkv_end && tkv < tkv_start + 1; ++tkv) {
-		const int err = KV->del(reinterpret_cast<const char *>(&tkv->key), sizeof(tkv->key));
+		const int err = (int)(co_await KV->del(reinterpret_cast<const char *>(&tkv->key), sizeof(tkv->key)));
 		if (ENODATA != err) {
 			UDEPOT_ERR("put returned %d tid=%u key=0x%16lx.", err, tid, tkv->key);
-			return err;
+			co_return (trt::RetT)(int)err;
 		}
 	}
 	// assert(0 == static_cast<::KV*>(KV)->get_size());
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((optimize("unroll-loops")))
-static int put_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
+static trt::CoroTask put_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
 {
 	//printf("tid: %lu start: %lu end: %lu\n", (unsigned long)tid, (unsigned long)start, (unsigned long) end);
 	char keyb[32] = { 0 };
 	// char val[conf_g.kv_val_size_m];
 	char *const val = (char *) malloc(conf_g.kv_val_size_m);
 	if (nullptr == val)
-		return ENOMEM;
+		co_return (trt::RetT)(int)ENOMEM;
 	memset(val, 0, conf_g.kv_val_size_m);
 	for (u64 i = start; i < end; ++i) {
 		const u64 key = ((conf_g.seed_m + i) * prime_g);
@@ -261,26 +262,27 @@ static int put_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 sta
 		const u64 val_size = conf_g.kv_val_size_m; //8 + (valu % (conf_g.kv_val_size_m - 8 + 1));
 		memcpy(val, &valu, sizeof(key));
 		memcpy(keyb, &key, sizeof(key));
-		const int err = KV->put(keyb, key_size, val, val_size);
+		const int err = (int)(co_await KV->put(keyb, key_size, val, val_size));
 		if (0 != err && EEXIST != err) {
 			UDEPOT_ERR("put returned %d tid=%u key=0x%16lx.", err, tid, key);
 			assert(0);
-			return err;
+			free(val);
+			co_return (trt::RetT)(int)err;
 		}
 	}
 	free(val);
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((optimize("unroll-loops")))
-static int get_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
+static trt::CoroTask get_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
 {
 	char keyb[32] = { 0 };
 	// char val_out[conf_g.kv_val_size_m];
 	char *const val_out = (char *) malloc(conf_g.kv_val_size_m);
 	if (nullptr == val_out)
-		return ENOMEM;
+		co_return (trt::RetT)(int)ENOMEM;
 	// const u64 diff = 0 < end - start ? end - start : 1;
 	// u64 q = prime_g % diff;
 	// for (u64 i = start; i < end; ++i, q = (q + prime_g) % (diff)) {
@@ -291,26 +293,27 @@ static int get_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 sta
 		const u64 key_size = 8 + (key % 24);
 		memcpy(keyb, &key, sizeof(key));
 		size_t val_size_read, val_size;
-		const int err = KV->get(keyb, key_size, val_out, conf_g.kv_val_size_m, val_size_read, val_size);
+		const int err = (int)(co_await KV->get(keyb, key_size, val_out, conf_g.kv_val_size_m, val_size_read, val_size));
 		u64 val_ret;
 		memcpy(&val_ret, val_out, sizeof(val_ret));
 
 		if (0 != err || val_ret != valu) {
 			UDEPOT_ERR("get returned %d vale=%lu valret=%lu.", err, valu, val_ret);
 			assert(0); // error
-			return err;
+			free(val_out);
+			co_return (trt::RetT)(int)err;
 		}
 		// const u64 val_size = 8 + (valu % (conf_g.kv_val_size_m - 8 + 1));
 		// assert(val_size == 8 + (valu % (conf_g.kv_val_size_m - 8 + 1)));
 		assert(val_size_read == val_size);
 	}
 	free(val_out);
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((optimize("unroll-loops"), unused))
-static int put_test_thin_mbuff(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
+static trt::CoroTask put_test_thin_mbuff(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
 {
 	UDEPOT_DBG("tid: %lu start: %lu end: %lu\n", (unsigned long)tid, (unsigned long)start, (unsigned long) end);
 	const size_t prefix_size = KV->putKeyvalPrefixSize();
@@ -346,23 +349,24 @@ static int put_test_thin_mbuff(uDepotSalsa<RT> *const KV, const u32 tid, const u
 		mb.append(std::ref(append_fn));
 		assert(mb.get_valid_size() == prefix_size + key_size + val_size);
 		mb.reslice(key_size + val_size /* len */, prefix_size /* offset */);
-		const int err = KV->put(mb, key_size);
+		const int err = (int)(co_await KV->put(mb, key_size));
 		if (0 != err && EEXIST != err) {
 			UDEPOT_ERR("put returned %d tid=%u key=0x%16lx.", err, tid, key);
 			assert(0);
-			return err;
+			KV->mbuff_free_buffers(mb);
+			co_return (trt::RetT)(int)err;
 		}
 		// assert(mb.get_free_size() + mb.get_valid_size() == align_up(conf_g.kv_val_size_m + 32 + prefix_size, 4096));
 		// assert(mb.get_valid_size() == align_up(val_size + key_size + prefix_size, 4096));
 	}
 	// assert(mb.get_free_size() + mb.get_valid_size() == align_up(conf_g.kv_val_size_m + 32 + prefix_size, 4096));
 	KV->mbuff_free_buffers(mb);
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((optimize("unroll-loops"), unused))
-static int get_test_thin_mbuff(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
+static trt::CoroTask get_test_thin_mbuff(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
 {
 	int err = 0;
 	const size_t prefix_size = KV->putKeyvalPrefixSize();
@@ -371,7 +375,7 @@ static int get_test_thin_mbuff(uDepotSalsa<RT> *const KV, const u32 tid, const u
 	Mbuff keymb = KV->mbuff_alloc(32);
 	assert(keymb.get_free_size() == align_up(32, 4096));
 	keymb.append_zero(32);
-	RT::Sched::yield(); // This targets trt, so that all tasks allocate their buffer first and then issue their operations
+	co_await RT::Sched::yield(); // This targets trt, so that all tasks allocate their buffer first and then issue their operations
 	const u64 diff = 0 < end - start ? end - start : 1;
 	u64 q = prime_g % diff;
 	for (u64 i = start; i < end; ++i, q = (q + prime_g) % diff) {
@@ -400,7 +404,7 @@ static int get_test_thin_mbuff(uDepotSalsa<RT> *const KV, const u32 tid, const u
 		assert(keymb.get_valid_size() == key_size);
 
 		mb.reslice(0);
-		err = KV->get(keymb, mb);
+		err = (int)(co_await KV->get(keymb, mb));
 		const u64 val_ret = 0 == err ? mb.read_val<u64>(0) : 0;
 		if (0 != err || val_ret != valu) {
 			UDEPOT_ERR("get returned %d vale=%lu valret=%lu.", err, valu, val_ret);
@@ -415,23 +419,23 @@ static int get_test_thin_mbuff(uDepotSalsa<RT> *const KV, const u32 tid, const u
 	keymb.reslice(0);
 	assert(keymb.get_free_size() + keymb.get_valid_size() == align_up(32, 4096));
 	KV->mbuff_free_buffers(keymb);
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((optimize("unroll-loops")))
-static int del_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
+static trt::CoroTask del_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
 {
 	char keyb[32] = { 0 };
 	for (u64 i = start; i < end; ++i) {
 		const u64 key = ((conf_g.seed_m + i) * prime_g);
 		const u64 key_size = 8 + (key % 24);
 		memcpy(keyb, &key, sizeof(key));
-		const int err = KV->del(keyb, key_size);
+		const int err = (int)(co_await KV->del(keyb, key_size));
 		if (0 != err) {
 			UDEPOT_ERR("get returned %d.", err);
 			assert(0); // error
-			return err;
+			co_return (trt::RetT)(int)err;
 		}
 	}
 	// make sure that enodata is returned on invalid keys
@@ -439,20 +443,20 @@ static int del_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 sta
 		const u64 key = ((conf_g.seed_m + i) * prime_g);
 		const u64 key_size = 8 + (key % 24);
 		memcpy(keyb, &key, sizeof(key));
-		const int err = KV->del(keyb, key_size);
+		const int err = (int)(co_await KV->del(keyb, key_size));
 		if (ENODATA != err) {
 			UDEPOT_ERR("get returned %d.", err);
 			assert(0); // error
-			return err;
+			co_return (trt::RetT)(int)err;
 		}
 	}
 	// assert(0 == static_cast<::KV*>(KV)->get_size());
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((optimize("unroll-loops")))
-static int del_rnd_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
+static trt::CoroTask del_rnd_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64 start, const u64 end)
 {
 	char keyb[32] = { 0 };
 	u64 q = prime_g % (end - start);
@@ -460,11 +464,11 @@ static int del_rnd_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64
 		const u64 key = (start + conf_g.seed_m + q) * prime_g;
 		const u64 key_size = 8 + (key % 24);
 		memcpy(keyb, &key, sizeof(key));
-		const int err = KV->del(keyb, key_size);
+		const int err = (int)(co_await KV->del(keyb, key_size));
 		if (0 != err) {
 			UDEPOT_ERR("del returned %d.", err);
 			assert(0); // error
-			return err;
+			co_return (trt::RetT)(int)err;
 		}
 		q = (q + prime_g) % (end - start);
 	}
@@ -472,15 +476,15 @@ static int del_rnd_test_thin(uDepotSalsa<RT> *const KV, const u32 tid, const u64
 		const u64 key = (start + conf_g.seed_m + q) * prime_g;
 		const u64 key_size = 8 + (key % 24);
 		memcpy(keyb, &key, sizeof(key));
-		const int err = KV->del(keyb, key_size);
+		const int err = (int)(co_await KV->del(keyb, key_size));
 		if (ENODATA != err) {
 			UDEPOT_ERR("del returned %d.", err);
 			assert(0); // error
-			return err;
+			co_return (trt::RetT)(int)err;
 		}
 		q = (q + prime_g) % (end - start);
 	}
-	return 0;
+	co_return 0;
 }
 
 struct workload_part {
@@ -536,7 +540,7 @@ static void test_thread(thread_arg *const arg)
 	UDEPOT_DBG("Thread %u starting test roffset=%lu reads=%lu woffset=%lu writes=%lu.\n",
 		tid, arg->read_p.start, arg->read_p.len, arg->write_p.start, arg->write_p.len);
 	clock_gettime(CLOCK_MONOTONIC, &before);
-	err = put_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len);
+	err = (int)put_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len).run_sync();
 	clock_gettime(CLOCK_MONOTONIC, &after);
 	if (0 != err) {
 		test_failure_g = true;
@@ -554,7 +558,7 @@ static void test_thread(thread_arg *const arg)
 	arg->wr_start = before;
 	arg->wr_finish = after;
 	clock_gettime(CLOCK_MONOTONIC, &before);
-	err = get_fn(KV, tid, arg->read_p.start, arg->read_p.start + arg->read_p.len);
+	err = (int)get_fn(KV, tid, arg->read_p.start, arg->read_p.start + arg->read_p.len).run_sync();
 	clock_gettime(CLOCK_MONOTONIC, &after);
 	if (0 != err) {
 		test_failure_g = true;
@@ -566,7 +570,7 @@ static void test_thread(thread_arg *const arg)
 
 	if (conf_g.del_test_m) {
 		pthread_barrier_wait(&barrier_g); // DELs start
-		err = del_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len);
+		err = (int)del_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len).run_sync();
 		if (0 != err) {
 			test_failure_g = true;
 			UDEPOT_ERR("udepot del test ret w/%d.", err);
@@ -614,37 +618,37 @@ static void gc_test_thread(thread_arg *const arg)
 
 	printf("GC test Thread %u starting test offset=%lu reads=%lu writes=%lu.\n",
 	        tid, arg->read_p.start, arg->read_p.len, arg->write_p.len);
-	err = put_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len);
+	err = (int)put_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len).run_sync();
 	if (0 != err) {
 		UDEPOT_ERR("udepot put test ret w/%d.", err);
 		goto fail0;
 	}
 	for (int i = 0; i < 10; ++i) {
-		err = put_rnd_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len);
+		err = (int)put_rnd_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len).run_sync();
 		if (0 != err) {
 			UDEPOT_ERR("udepot put test ret w/%d.", err);
 			goto fail0;
 		}
-		// err = del_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len);
+		// err = (int)del_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len).run_sync();
 		// if (0 != err) {
 		// 	UDEPOT_ERR("udepot del test ret w/%d.", err);
 		// 	goto fail0;
 		// }
 		UDEPOT_DBG("Wrote %lu KV pairs.", arg->write_p.len * (i + 1));
 	}
-	err = put_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len);
+	err = (int)put_fn(KV, tid, arg->write_p.start, arg->write_p.start + arg->write_p.len).run_sync();
 	if (0 != err) {
 		UDEPOT_ERR("udepot put test ret w/%d.", err);
 		goto fail0;
 	}
-	err = get_fn(KV, tid, arg->read_p.start, arg->read_p.start + arg->read_p.len);
+	err = (int)get_fn(KV, tid, arg->read_p.start, arg->read_p.start + arg->read_p.len).run_sync();
 	if (0 != err) {
 		UDEPOT_ERR("udepot get test ret w/%d.", err);
 		goto fail0;
 	}
 
 	if (conf_g.del_test_m) {
-		err = del_fn(KV, tid, arg->read_p.start, arg->read_p.start + arg->read_p.len);
+		err = (int)del_fn(KV, tid, arg->read_p.start, arg->read_p.start + arg->read_p.len).run_sync();
 		if (0 != err) {
 			UDEPOT_ERR("udepot del test ret w/%d.", err);
 			goto fail0;
@@ -738,15 +742,15 @@ struct t_worker_arg {
 };
 
 template<typename RT>
-void *
+trt::CoroTask
 t_worker(void *arg_) {
 	t_worker_arg<RT> *arg = static_cast<t_worker_arg<RT> *>(arg_);
 	size_t start = arg->task_part.start;
 	size_t end   = arg->task_part.start + arg->task_part.len;
-	arg->op_fn((uDepotSalsa<RT> *)arg->kv, 0, start, end);
+	co_await arg->op_fn((uDepotSalsa<RT> *)arg->kv, 0, start, end);
 	*(arg->ops_completed) += arg->task_part.len;
 	arg->ap->put_arg(arg);
-	return nullptr;
+	co_return 0;
 }
 
 // We can run trt (within a thread) in two ways:
@@ -755,8 +759,8 @@ t_worker(void *arg_) {
 //
 //  We use to do (2), but now we do (1).
 template<typename RT>
-static double
-do_trt_run(KV *kv, test_fn<RT> fn, workload_part thread_part)
+static trt::CoroTask
+do_trt_run(KV *kv, test_fn<RT> fn, workload_part thread_part, double *secs_out)
 {
 	trt::Task::List tl;
 	size_t ntasks = conf_g.trt_ntasks_m;
@@ -776,13 +780,14 @@ do_trt_run(KV *kv, test_fn<RT> fn, workload_part thread_part)
 	}
 
 	xtimer_t t; timer_init(&t); timer_start(&t);
-	trt::T::spawn_many(tl);
+	co_await trt::T::spawn_many(tl);
 	for (size_t i=0; i<ntasks; i++) {
-		trt::T::task_wait();
+		co_await trt::T::task_wait();
 	}
 	timer_pause(&t);
 
-	return timer_secs(&t);
+	*secs_out = timer_secs(&t);
+	co_return 0;
 }
 
 struct t_main_arg {
@@ -795,7 +800,7 @@ struct t_main_arg {
 
 // main trt task for benchmaring
 template<typename RT>
-void *t_main_bench(void *arg__) {
+trt::CoroTask t_main_bench(void *arg__) {
 
 	trt_dmsg("main task: enter\n");
 	t_main_arg *arg = static_cast<t_main_arg *>(arg__);
@@ -842,7 +847,7 @@ void *t_main_bench(void *arg__) {
 		timer_init(&t0);
 		timer_start(&t0);
 	}
-	secs = do_trt_run(arg->kv.get(), put_fn, arg->write_p);
+	co_await do_trt_run<RT>(arg->kv.get(), put_fn, arg->write_p, &secs);
 	printf("TRT thread %4u PUTs time=%lfs Mops/sec=%lf ops=%lu\n", arg->thread_id, secs, arg->write_p.len/(secs*1000*1000), arg->write_p.len);
 	pthread_barrier_wait(arg->barrier);
 	if (arg->thread_id == 0) {
@@ -859,7 +864,7 @@ void *t_main_bench(void *arg__) {
 		timer_init(&t0);
 		timer_start(&t0);
 	}
-	secs = do_trt_run(arg->kv.get(), get_fn, arg->read_p);
+	co_await do_trt_run<RT>(arg->kv.get(), get_fn, arg->read_p, &secs);
 	printf("TRT GETs thread %4u time=%lfs Mops/sec=%lf ops=%lu\n", arg->thread_id, secs, arg->read_p.len/(secs*1000*1000), arg->read_p.len);
 	pthread_barrier_wait(arg->barrier);
 	if (arg->thread_id == 0) {
@@ -870,7 +875,7 @@ void *t_main_bench(void *arg__) {
 
 	pthread_barrier_wait(arg->barrier);
 	if (conf_g.del_test_m && conf_g.thin_test_m) {
-		do_trt_run(arg->kv.get(), del_fn, arg->read_p);
+		co_await do_trt_run<RT>(arg->kv.get(), del_fn, arg->read_p, &secs);
 	}
 
 	pthread_barrier_wait(arg->barrier);
@@ -893,12 +898,12 @@ void *t_main_bench(void *arg__) {
 		trt_dmsg("%s: DONE\n", __FUNCTION__);
 	}
 
-	return nullptr;
+	co_return 0;
 }
 
 // main trt task for benchmaring
 template<typename RT>
-void *t_main_server(void *arg__) {
+trt::CoroTask t_main_server(void *arg__) {
 
 	trt_dmsg("main task: server mode: enter\n");
 	t_main_arg *arg = static_cast<t_main_arg *>(arg__);
@@ -957,7 +962,7 @@ void *t_main_server(void *arg__) {
 	}
 	#endif
 
-	return nullptr;
+	co_return 0;
 }
 
 template<typename RT>
@@ -1341,24 +1346,24 @@ void test_build ()
 	key[0] = 0xBE;
 	key[1] = 0xEF;
 	char val[3078] = { 0 };
-	rc = KV->put(key, sizeof(key), val, sizeof(val));
+	rc = (int)KV->put(key, sizeof(key), val, sizeof(val)).run_sync();
 	assert(0 == rc);
 	key[0] = 0xDE;
 	key[1] = 0xAD;
-	rc = KV2->put(key, sizeof(key), val, sizeof(val));
+	rc = (int)KV2->put(key, sizeof(key), val, sizeof(val)).run_sync();
 	assert(0 == rc);
 
 	char val_out[3078];
 	size_t val_size_read, val_size;
 	key[0] = 0xBE;
 	key[1] = 0xEF;
-	rc = KV->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size);
+	rc = (int)KV->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size).run_sync();
 	assert(0 == rc);
 	assert(0 == memcmp(val, val_out, sizeof(val)));
 	assert(val_size_read == val_size);
 	key[0] = 0xDE;
 	key[1] = 0xAD;
-	rc = KV2->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size);
+	rc = (int)KV2->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size).run_sync();
 	assert(0 == rc);
 	assert(0 == memcmp(val, val_out, sizeof(val)));
 	assert(val_size_read == val_size);
@@ -1398,23 +1403,23 @@ int test_crash_recovery_minimal ()
 		key[0] = 0xBE;
 		key[1] = 0xEF;
 		char val[3078] = { 0 };
-		rc = KV->put(key, sizeof(key), val, sizeof(val));
+		rc = (int)KV->put(key, sizeof(key), val, sizeof(val)).run_sync();
 		assert(0 == rc);
 		key[0] = 0xDE;
 		key[1] = 0xAD;
-		rc = KV->put(key, sizeof(key), val, sizeof(val));
+		rc = (int)KV->put(key, sizeof(key), val, sizeof(val)).run_sync();
 		assert(0 == rc);
 
 		char val_out[3078];
 		key[0] = 0xBE;
 		key[1] = 0xEF;
-		rc = KV->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size);
+		rc = (int)KV->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size).run_sync();
 		assert(0 == rc);
 		assert(0 == memcmp(val, val_out, sizeof(val)));
 		assert(val_size_read == val_size);
 		key[0] = 0xDE;
 		key[1] = 0xAD;
-		rc = KV->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size);
+		rc = (int)KV->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size).run_sync();
 		assert(0 == rc);
 		assert(0 == memcmp(val, val_out, sizeof(val)));
 		assert(val_size_read == val_size);
@@ -1445,13 +1450,13 @@ int test_crash_recovery_minimal ()
 		assert(0 == rc);
 		key[0] = 0xBE;
 		key[1] = 0xEF;
-		rc = KVrestored->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size);
+		rc = (int)KVrestored->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size).run_sync();
 		assert(0 == rc);
 		assert(0 == memcmp(val, val_out, sizeof(val)));
 		assert(val_size_read == val_size);
 		key[0] = 0xDE;
 		key[1] = 0xAD;
-		rc = KVrestored->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size);
+		rc = (int)KVrestored->get(key, sizeof(key), val_out, sizeof(val_out), val_size_read, val_size).run_sync();
 		assert(0 == rc);
 		assert(0 == memcmp(val, val_out, sizeof(val)));
 		assert(val_size_read == val_size);
