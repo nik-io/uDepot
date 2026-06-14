@@ -25,7 +25,6 @@ TaskBase::TaskBase(TaskBase *parent, bool t_detached, TaskType type)
  #endif
  { }
 
-
 TaskBase::~TaskBase() {}
 
 } // end namespace

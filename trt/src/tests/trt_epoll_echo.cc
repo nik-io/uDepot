@@ -13,12 +13,11 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
-#include <netinet/tcp.h> // TCP_NODELAY
-#include <string.h> // strerror
+#include <netinet/tcp.h>
+#include <string.h>
 
 #include "trt/uapi/trt.hh"
 #include "trt_backends/trt_epoll.hh"
-
 
 extern "C" {
 	#include "trt_util/net_helpers.h"
@@ -26,7 +25,7 @@ extern "C" {
 
 using namespace trt;
 
-static void *
+static CoroTask
 echo_task(void *arg)
 {
 	char buff[1024];
@@ -36,12 +35,11 @@ echo_task(void *arg)
 	const int optval = 1;
 	if (setsockopt(fd, SOL_TCP, TCP_NODELAY, &optval, sizeof(optval)) == -1) {
 		fprintf(stderr, "setsockopt %s err=%d.\n", strerror(errno), errno);
-		return nullptr;
+		co_return 0;
 	}
 
 	while (true) {
-
-		r_ret = Epoll::recv(fd, buff, sizeof(buff), 0);
+		r_ret = co_await Epoll::recv(fd, buff, sizeof(buff), 0);
 		if (r_ret < 0) {
 			perror("recv");
 			break;
@@ -49,7 +47,7 @@ echo_task(void *arg)
 			break;
 		}
 
-		s_ret = Epoll::send(fd, buff, r_ret, 0);
+		s_ret = co_await Epoll::send(fd, buff, r_ret, 0);
 		if (s_ret < 0) {
 			perror("send");
 			continue;
@@ -60,11 +58,10 @@ echo_task(void *arg)
 	}
 
 	Epoll::close(fd);
-
-	return nullptr;
+	co_return 0;
 }
 
-static void *
+static CoroTask
 echo_srv(void *arg)
 {
 	int err, fd;
@@ -72,11 +69,9 @@ echo_srv(void *arg)
 	const char *url_str = (const char *)arg;
 	struct addrinfo *ai_list, *ai_b;
 
-	// initialize epoll and start poller
 	Epoll::init();
-	T::spawn(Epoll::poller_task, nullptr, nullptr, true, TaskType::TASK);
+	T::spawn_detached_no_wait(Epoll::poller_task, nullptr, TaskType::TASK);
 
-	// bind and listen to URL given by the user
 	err = url_parse(&url, url_str);
 	if (err) {
 		fprintf(stderr, "url_parse failed\n");
@@ -95,18 +90,18 @@ echo_srv(void *arg)
 	socklen_t cli_addr_len;
 	while (true) {
 		printf("accept\n");
-		int accept_fd = Epoll::accept(fd, &cli_addr, &cli_addr_len);
+		int accept_fd = co_await Epoll::accept(fd, &cli_addr, &cli_addr_len);
 		printf("accept returned: %d\n", accept_fd);
 		if (accept_fd == -1) {
 			perror("accept");
 		}
-
-		T::spawn(echo_task, (void *)(uintptr_t)accept_fd, nullptr, true, TaskType::TASK);
+		co_await T::spawn(echo_task, (void *)(uintptr_t)accept_fd,
+		                  nullptr, true, TaskType::TASK);
 	}
 
 	url_free_fields(&url);
 	freeaddrinfo(ai_b);
-	return nullptr;
+	co_return 0;
 }
 
 int main(int argc, char *argv[])

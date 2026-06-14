@@ -100,6 +100,11 @@ public:
     // NB: called in Scheduler::notify_
     virtual TaskBase *set_ready() = 0;
 
+    // Non-blocking scan: returns a ready FutureBase* if one is available,
+    // nullptr if the caller must sleep (state left as SCANNING).
+    // Handles REDO races internally by re-scanning.
+    virtual FutureBase *try_wait_() = 0;
+
     // used by the user. it will either return directly or try to wait in the
     // scheduler
     virtual FutureBase *wait() = 0;
@@ -109,7 +114,7 @@ public:
     //  true:  transition succesfull, do nothing
     //  false: transition failed, please reschedule task
     //
-    // NB: used in scheduler when handing Cmd::WAIT
+    // NB: used in WaitAwaitable::await_suspend
     virtual bool try_set_state_to_waiting(void) = 0;
 };
 

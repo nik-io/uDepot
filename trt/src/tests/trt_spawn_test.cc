@@ -14,23 +14,22 @@ using namespace trt;
 
 #define NUM (0x100)
 
-void *t2(void *arg) {
+CoroTask t2(void *arg) {
 	uintptr_t x = (uintptr_t)arg;
 	trt_dmsg("returning\n");
-	return (void *)(x+1);
+	co_return (RetT)(x + 1);
 }
 
-void *t1(void *arg)
+CoroTask t1(void *arg)
 {
 	trt_dmsg("spawning t2\n");
-	T::spawn(t2, arg, (void *)0xf11f11);
+	co_await T::spawn(t2, arg, (void *)0xf11f11);
 	trt_dmsg("waiting t2\n");
-	std::tuple<trt::RetT, void *> ret __attribute__((unused)) = T::task_wait();
-	assert(std::get<0>(ret) == (NUM+1));
-	assert(std::get<1>(ret) == (void *)0xf11f11);
+	auto [ret, ctx] = co_await T::task_wait();
+	assert(ret == (NUM + 1));
+	assert(ctx == (void *)0xf11f11);
 	trt_dmsg("returning\n");
-
-	return nullptr;
+	co_return 0;
 }
 
 int main(int argc, char *argv[])
