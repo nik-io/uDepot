@@ -15,6 +15,8 @@
 #ifndef TRT_EPOLL_HH_
 #define TRT_EPOLL_HH_
 
+#include <coroutine>
+#include <functional>
 #include <unordered_map>
 #include <tuple>
 #include <sys/socket.h>
@@ -24,71 +26,102 @@ extern "C" {
     #include "trt_util/misc.h"  // spinlock_t
 }
 #include "trt_util/deque_mt.hh"
-
-// The design we follow is to have one epoll context per scheduler [1].  This
-// decision has implications. See for example
-// tests/trt_epoll_multi_threaded_server.cc on how we can implement a
-// multi-threaded server listening on a single socket.
-//
-// [1] There are alternative designs where we use one global epoll context
-// (maybe with an edge triggered approach). I don't think that they will work as
-// well for multiple threads, though.
+#include "trt/local_single_sync.hh"
+#include "trt/task.hh"           // CoroTask, TaskFn, TaskFnArg, TaskType
 
 namespace trt {
 
-enum class EpollSpawnPolicy {
-    Local,      // only local
-    Distribute, // both local and remote
+class Scheduler;
+extern __thread Scheduler *localScheduler__;
+
+class EpollState;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EpollOpType — direction of an epoll-backed IO operation
+// ─────────────────────────────────────────────────────────────────────────────
+enum class EpollOpType { IN, OUT };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EpollSpawnPolicy — where to spawn an accepted connection's handler task
+// ─────────────────────────────────────────────────────────────────────────────
+enum class EpollSpawnPolicy { Local, Distribute };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EpollOpAwaitable
+//
+// Wraps a single retried-on-EAGAIN socket operation in a C++20 awaitable.
+// The caller writes:  ssize_t r = co_await Epoll::recv(fd, buf, len, 0);
+//
+// Lifecycle:
+//  1. await_ready():   try the syscall. If it succeeds (or fails with a hard
+//                      error), cache the result and return true (no suspend).
+//                      If EAGAIN/EWOULDBLOCK, return false.
+//  2. await_suspend(): register this awaitable's lsao_ into the EpollState fd
+//                      map so the poller can wake us, then set the current TRT
+//                      task as waiter on lsao_.  Always returns true (suspend).
+//  3. await_resume():  if we didn't suspend (ready_==true) just return cached
+//                      ret_.  Otherwise decrement pending_waits_, check for
+//                      shutdown, and retry the syscall once (level-triggered
+//                      epoll guarantees the fd is ready at this point).
+//                      Calls register_fd on the resulting fd when reg_==true
+//                      (accept path).
+// ─────────────────────────────────────────────────────────────────────────────
+struct EpollOpAwaitable {
+    EpollState              *es_;
+    int                      fd_;
+    EpollOpType              ty_;
+    std::function<ssize_t()> syscall_;  // captures all per-op arguments
+    LocalSingleAsyncObj      lsao_{};
+    ssize_t                  ret_   = -1;
+    bool                     ready_ = false;  // true when no suspension needed
+    bool                     reg_   = false;  // register new fd after accept
+
+    EpollOpAwaitable(EpollState *es, int fd, EpollOpType ty,
+                     std::function<ssize_t()> fn, bool reg = false)
+        : es_(es), fd_(fd), ty_(ty), syscall_(std::move(fn)), reg_(reg) {}
+
+    // Non-copyable, non-movable: lsao_ must stay at a fixed address while
+    // it is registered as the async object for an fd in EpollState::fds_.
+    EpollOpAwaitable(const EpollOpAwaitable &) = delete;
+    EpollOpAwaitable &operator=(const EpollOpAwaitable &) = delete;
+    EpollOpAwaitable(EpollOpAwaitable &&) = delete;
+
+    bool    await_ready()  noexcept;
+    bool    await_suspend(std::coroutine_handle<> h) noexcept;
+    ssize_t await_resume() noexcept;
 };
 
-
-// per-thread epoll state
+// ─────────────────────────────────────────────────────────────────────────────
+// EpollState — per-scheduler epoll context (internal implementation)
+// ─────────────────────────────────────────────────────────────────────────────
 class EpollState {
-    enum class State {UNINITIALIZED, READY, DRAINING, DONE};
+    friend EpollOpAwaitable;
+
+    enum class State { UNINITIALIZED, READY, DRAINING, DONE };
     State ep_state_;
-    int   ep_fd_; // epoll file descriptor
+    int   ep_fd_;
     int   ep_wait_timeout_;
 
-    // registered fds (one for each type of event, for now: IN, OUT)
-    //    ->  null => nothing to notify
-    //    -> !null => the async object to notify
     struct FdInfo {
         uint32_t event_mask;
         int      old_flags;
-
         LocalSingleAsyncObj *ao_in_, *ao_out_;
 
         FdInfo(uint32_t mask, int fl)
-            : event_mask(mask)
-            , old_flags(fl)
-            , ao_in_(nullptr)
-            , ao_out_(nullptr) {}
+            : event_mask(mask), old_flags(fl)
+            , ao_in_(nullptr), ao_out_(nullptr) {}
     };
     std::unordered_map<int, FdInfo> fds_;
     size_t pending_waits_;
 
-    // queue for remotely spawning tasks
-    // (this could be in the scheduler, but here is more contained and we only
-    // spawn in schedulers that have an epoll spawner)
-    //
-    // This allows tasks calling accept_ll() to enqueue tasks to other
-    // schedulers. The queue is checked by the poller.
     struct EpollSpawn {
-        int       reg_fd;     // register fd
-        uint32_t  reg_mask;   // register mask
+        int       reg_fd;
+        uint32_t  reg_mask;
         TaskFn    spawn_fn;
         TaskFnArg spawn_arg;
-        /* no parent */
-        /* detached */
-        /* trt::TaskType::Task */
 
         EpollSpawn(int fd, uint32_t m, TaskFn fn, TaskFnArg arg)
-        : reg_fd(fd)
-        , reg_mask(m)
-        , spawn_fn(fn)
-        , spawn_arg(arg)
-        {}
-
+            : reg_fd(fd), reg_mask(m), spawn_fn(fn), spawn_arg(arg) {}
         EpollSpawn() : EpollSpawn(-1, 0, nullptr, nullptr) {}
     };
     deque_mt<EpollSpawn> epoll_spawn_deque_;
@@ -99,74 +132,53 @@ public:
     EpollState(EpollState const &) = delete;
     void operator=(EpollState const &) = delete;
 
-    // register a file descriptor to be handled by the poller
-    // (adds it to the epoll fds and sets it as non-blocking)
-    void register_fd(int fd, uint32_t event_mask /* EPOLLIN or EPOLLOUT */);
-    //
-    // deregister a file descriptor from the poller
-    //  returns != 0 if there was an error (e.g., fd not found)
-    //
-    // fcntl mask will return to its previous value (i.e., before register_fd
-    // sets O_NONBLOCK)
-    int deregister_fd(int fd);
+    void register_fd(int fd, uint32_t event_mask);
+    int  deregister_fd(int fd);
 
-    void init(void);
-    void stop(void);
+    void init();
+    void stop();
 
-    void *poller_task(void *arg);
+    CoroTask poller_task(void *arg);
 
     void set_timeout_param(int t) { ep_wait_timeout_ = t; }
-    int get_timeout_param() { return ep_wait_timeout_; }
-    int get_timeout() {
+    int  get_timeout_param()      { return ep_wait_timeout_; }
+    int  get_timeout() {
         return T::io_npending_get() == 0 ? get_timeout_param() : 0;
     }
 
-
 private:
-    enum class OpType {IN, OUT};
-
-    void notify_maybe(int fd, OpType ty);
-    void shutdown_all(void);
-
-    // wrapper for socket operations that goes over the trt mehanics (i.e,.
-    // creates an async object, a waitset and a future for the operation).
-    template<typename F, typename... Args>
-    typename std::result_of<F(int, Args...)>::type
-    op_wrapper(F &&f, OpType ty, int fd, Args &&... a);
+    void notify_maybe(int fd, EpollOpType ty);
+    void shutdown_all();
 
     EpollState *es_get_rr();
 
 public:
     int listen(int sockfd, int backlog);
 
-    int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
-    int accept_ll(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+    // These return EpollOpAwaitable — must be co_await'd.
+    EpollOpAwaitable accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+    EpollOpAwaitable accept_ll(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+    EpollOpAwaitable recv(int fd, void *buff, size_t len, int flags);
+    EpollOpAwaitable send(int fd, const void *buff, size_t len, int flags);
+    EpollOpAwaitable sendmsg(int fd, const struct msghdr *msg, int flags);
+    EpollOpAwaitable recvmsg(int fd, struct msghdr *msg, int flags);
 
-    ssize_t recv(int fd, void *buff, size_t len, int flags);
-    ssize_t send(int fd, const void *buff, size_t len, int flags);
-
-    ssize_t sendmsg(int fd, const struct msghdr *msg, int flags);
-    ssize_t recvmsg(int fd, struct msghdr *msg, int flags);
-
-    // register an fd a spawn a task. Will call setnonblocking()
-    // policy:
-    //  Local: locally
-    //  Distribute: distribute across multiple schedulers (including local)
     void register_and_spawn(int fd, uint32_t m, TaskFn fn, TaskFnArg arg,
                             EpollSpawnPolicy p);
 };
 
-// global epoll state
+// ─────────────────────────────────────────────────────────────────────────────
+// EpollGlobalState — registry of all per-scheduler EpollStates
+// ─────────────────────────────────────────────────────────────────────────────
 class EpollGlobalState {
-    static const size_t    STATES_NR_ = 128;
-    EpollState     *states_[STATES_NR_];
-    size_t          states_next_;
-    spinlock_t      lock_;
+    static const size_t STATES_NR_ = 128;
+    EpollState *states_[STATES_NR_];
+    size_t      states_next_;
+    spinlock_t  lock_;
 
 public:
     EpollGlobalState() : states_next_(0) {
-        // not sure if the default constructor will do it and too lazy to look
-        for (size_t i=0; i<STATES_NR_; i++)
+        for (size_t i = 0; i < STATES_NR_; i++)
             states_[i] = nullptr;
         spinlock_init(&lock_);
     }
@@ -187,23 +199,18 @@ public:
 
     void deregister_epoll_state(EpollState *st) {
         lock();
-        for (size_t i=0; i < STATES_NR_; i++) {
+        for (size_t i = 0; i < STATES_NR_; i++) {
             if (states_[i] == st) {
-                // shift array
                 for (;;) {
-                    states_[i] = (i < STATES_NR_ - 1) ? states_[i+1] : nullptr;
-                    if (states_[i] == nullptr)
-                        break;
+                    states_[i] = (i < STATES_NR_ - 1) ? states_[i + 1] : nullptr;
+                    if (states_[i] == nullptr) break;
                     i++;
                 }
-                // decrease last index
                 states_next_--;
-                // we are done
                 unlock();
                 return;
             }
         }
-        // state was not found. Let's consider this a bug and die
         unlock();
         fprintf(stderr, "%s:%d: state %p not found", __PRETTY_FUNCTION__, __LINE__, st);
         abort();
@@ -218,96 +225,69 @@ public:
     }
 };
 
-// users of epoll
+// ─────────────────────────────────────────────────────────────────────────────
+// Public Epoll API (thin wrappers around the thread-local EpollState__)
+// ─────────────────────────────────────────────────────────────────────────────
 #if !defined(TRT_EPOLL_SELF)
 extern thread_local EpollState EpollState__;
 
-// User API
 struct Epoll {
+    static void init()  { EpollState__.init(); }
+    static void stop()  { EpollState__.stop(); }
 
-    // Initialization:
-    // Typically, there are two things that need to be done on every scheduler
-    // that wants to use epoll: call init() to initialize thread-local state and
-    // spawn a poller task to check the epoll queue
-
-    // initialize scheduler-local state
-    static inline void init(void) { EpollState__.init(); }
-    // stop scheduler-local epoll
-    // TODO: explain
-    static inline void stop(void) { EpollState__.stop(); }
-
-    // poller task for checking queues
-    static void *poller_task(void *arg) { return EpollState__.poller_task(arg); };
-
-    // set socket to listen (NB: blocks does not go over trt) and register it to
-    // the local epoll context.
-    static int listen(int fd, int backlog) { return EpollState__.listen(fd, backlog); }
-
-    // accept() and accept_ll():
-    //
-    // wait for new connections on a listen socket
-    //  - if no new connection is available, the callign task will defer
-    //    execution until it is woken by the poller.
-    //
-    // Once a new connection is available, accept() will also register the file
-    // descriptor (which sets it to be non-blocking)
-    static int accept_ll(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-        return EpollState__.accept_ll(sockfd, addr, addrlen);
+    static CoroTask poller_task(void *arg) {
+        return EpollState__.poller_task(arg);
     }
-    static int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
+
+    static int listen(int fd, int backlog) {
+        return EpollState__.listen(fd, backlog);
+    }
+
+    // accept: waits for a new connection and registers the new fd.
+    static EpollOpAwaitable accept(int sockfd, struct sockaddr *addr,
+                                   socklen_t *addrlen) {
         return EpollState__.accept(sockfd, addr, addrlen);
     }
+    // accept_ll: waits but does NOT register the new fd (caller must register).
+    static EpollOpAwaitable accept_ll(int sockfd, struct sockaddr *addr,
+                                      socklen_t *addrlen) {
+        return EpollState__.accept_ll(sockfd, addr, addrlen);
+    }
 
-    // send / recv operations
-    //  if they return EWOULDBLOCK their execution will be defered until
-    //  the poller wakes them up.
-    static ssize_t recv(int fd, void *buf, size_t len, int flags) {
+    static EpollOpAwaitable recv(int fd, void *buf, size_t len, int flags) {
         return EpollState__.recv(fd, buf, len, flags);
     }
-    static ssize_t send(int fd, const void *buf, size_t len, int flags) {
+    static EpollOpAwaitable send(int fd, const void *buf, size_t len, int flags) {
         return EpollState__.send(fd, buf, len, flags);
     }
+    static EpollOpAwaitable sendmsg(int fd, const struct msghdr *msg, int flags) {
+        return EpollState__.sendmsg(fd, msg, flags);
+    }
+    static EpollOpAwaitable recvmsg(int fd, struct msghdr *msg, int flags) {
+        return EpollState__.recvmsg(fd, msg, flags);
+    }
 
-    // close a file descriptor and deregester it from the epoll loop.
     static int close(int fd) {
         int err = EpollState__.deregister_fd(fd);
-        if (err) {
-            fprintf(stderr, "%s:%d: deregister_fd returned error\n", __PRETTY_FUNCTION__, __LINE__);
-        }
+        if (err)
+            fprintf(stderr, "%s:%d: deregister_fd returned error\n",
+                    __PRETTY_FUNCTION__, __LINE__);
         return ::close(fd);
     }
 
-    // register_and_spawn() is a simple helper for building multi-threaded
-    // servers that use only a single listen socket.
-    // The idea is that the user calls accept_ll() and then uses this function
-    // to:
-    //  regsiter the accept fd
-    //  spawn a new task to handle it (either local or remotely based on a
-    //  policy)
     using SpawnPolicy = EpollSpawnPolicy;
     static void register_and_spawn(int fd, uint32_t m, TaskFn fn, TaskFnArg arg,
                                    EpollSpawnPolicy p) {
         return EpollState__.register_and_spawn(fd, m, fn, arg, p);
     }
 
-    static ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
-        return EpollState__.sendmsg(sockfd, msg, flags);
-    }
-
-    static ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags) {
-        return EpollState__.recvmsg(sockfd, msg, flags);
-    }
-
-    // default: 0 -- se EpollState__.get_timeout() on how is used.
     static void set_wait_timeout(int x) { EpollState__.set_timeout_param(x); }
-    static int get_wait_timeout() { return EpollState__.get_timeout_param(); }
+    static int  get_wait_timeout()      { return EpollState__.get_timeout_param(); }
 
-    // for debugging
     static void *epoll_handle() { return static_cast<void *>(&EpollState__); }
-
 };
 #endif
 
-}
+} // namespace trt
 
 #endif /* TRT_EPOLL_HH_ */

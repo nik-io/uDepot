@@ -27,14 +27,15 @@ struct GlobArg {
     SpdkGlobalState g_spdk;
     std::string     g_namepace;
     GlobArg(const char *n) : g_namepace(n) {}
-    void init(void) { g_spdk.init(); }
+    void init() { g_spdk.init(); }
 };
 
-void *
-t_io(void *arg__) {
+CoroTask
+t_io(void *arg__)
+{
     SpdkQpair *qp = static_cast<SpdkQpair *>(arg__);
 
-    uint32_t sector_size = qp->sqp_namespace->get_sector_size();
+    uint32_t sector_size    = qp->sqp_namespace->get_sector_size();
     uint64_t spdk_buff_size = 4096;
     SpdkPtr spdk_buff = std::move(qp->alloc_buffer(4096 / sector_size));
     if (spdk_buff.ptr_m == nullptr) {
@@ -43,29 +44,33 @@ t_io(void *arg__) {
     }
 
     trt_dmsg("Calling SPDK::read\n");
-    SPDK::read(qp, spdk_buff, 0, spdk_buff_size / sector_size);
+    ssize_t ret = co_await SPDK::read(qp, spdk_buff, 0, spdk_buff_size / sector_size);
+    if (ret < 0) {
+        fprintf(stderr, "SPDK::read failed\n");
+        exit(1);
+    }
 
     qp->free_buffer(std::move(spdk_buff));
-    return nullptr;
+    co_return 0;
 }
 
-void *
-t_init(void *arg__) {
-
+CoroTask
+t_init(void *arg__)
+{
     GlobArg *arg = static_cast<GlobArg *>(arg__);
 
     SPDK::init(arg->g_spdk);
     std::shared_ptr<SpdkQpair> qp = SPDK::getQpair(arg->g_namepace);
 
-    T::spawn(SPDK::poller_task, nullptr, nullptr, true, TaskType::TASK);
-    T::spawn(t_io, qp.get());
-    T::task_wait();
+    T::spawn_detached_no_wait(SPDK::poller_task, nullptr, TaskType::TASK);
+    co_await T::spawn(t_io, qp.get());
+    co_await T::task_wait();
 
     trt_dmsg("DONE: stopping SPDK\n");
     SPDK::stop();
 
     T::set_exit_all();
-    return nullptr;
+    co_return 0;
 }
 
 void usage(FILE *f, char *progname) {
@@ -75,32 +80,21 @@ void usage(FILE *f, char *progname) {
 int main(int argc, char *argv[])
 {
     int nthreads = 1;
-    bool help = false;
+    bool help    = false;
     int opt;
 
     while ((opt = getopt(argc, argv, "ht:")) != -1) {
         switch (opt) {
-            case 't':
-            nthreads = atol(optarg);
-            break;
-
-            case 'h':
-            help = true;
-            break;
-
-            default:
-            usage(stderr, argv[0]);
-            exit(1);
+            case 't': nthreads = atol(optarg); break;
+            case 'h': help = true; break;
+            default:  usage(stderr, argv[0]); exit(1);
         }
     }
 
-    if (help) {
-        usage(stdout, argv[0]);
-        exit(0);
-    }
+    if (help) { usage(stdout, argv[0]); exit(0); }
 
     if (nthreads <= 0) {
-        fprintf(stderr, "Invalid ntrheads value: %d\n", nthreads);
+        fprintf(stderr, "Invalid nthreads value: %d\n", nthreads);
         usage(stderr, argv[0]);
         exit(1);
     }
@@ -109,7 +103,7 @@ int main(int argc, char *argv[])
     g.init();
     Controller c;
 
-    for (int i=0; i<nthreads; i++)
+    for (int i = 0; i < nthreads; i++)
         c.spawn_scheduler(t_init, &g, TaskType::TASK);
 
     c.wait_for_all();

@@ -85,11 +85,8 @@ TrtFileIO::open(const char *pathname, int flags, mode_t mode) {
 	return 0;
 }
 
-// If we are not inside TRT, just do the blocking operation
-//
-// NB: Because we use the aio interface, the fd does not need to be set as
-// non-blocking, so this should work.
-
+// Compatibility pread/pwrite: use blocking syscalls directly.
+// The hot path uses pread_native() / pwrite_native() coroutines.
 
 ssize_t TrtFileIO::pread(void *buff, size_t len, off_t off) {
 	if (unlikely(off & 511)) {
@@ -103,12 +100,7 @@ ssize_t TrtFileIO::pread(void *buff, size_t len, off_t off) {
 		return -1;
 	}
 	const ssize_t aligned_len = align_up(len, 512);
-	ssize_t rc;
-	if (trt::T::in_trt()) {
-		rc = trt::AIO::pread(get_tls_fd(), aligned_buf, aligned_len, off);
-	} else {
-		rc = ::pread(fd_m, aligned_buf, aligned_len, off);
-	}
+	ssize_t rc = ::pread(get_tls_fd(), aligned_buf, aligned_len, off);
 	assert(aligned_len == rc);
 	memcpy(buff, aligned_buf, len);
 	buf_on_stack_or_malloc_free(aligned_buf, len);
@@ -127,12 +119,7 @@ ssize_t TrtFileIO::pwrite(const void *buff, size_t len, off_t off) {
 		return -1;
 	}
 	memcpy(aligned_buf, buff, len);
-	ssize_t rc;
-	if (trt::T::in_trt()) {
-		rc = trt::AIO::pwrite(get_tls_fd(), aligned_buf, len, off);
-	} else {
-		rc = ::pwrite(fd_m, aligned_buf, len, off);
-	}
+	ssize_t rc = ::pwrite(get_tls_fd(), aligned_buf, len, off);
 	buf_on_stack_or_malloc_free(aligned_buf, len);
 	return rc;
 }
@@ -151,12 +138,7 @@ ssize_t TrtFileIO::preadv(const struct iovec *iov, int iovcnt, off_t offset)
 		return -1;
 	}
 	const ssize_t aligned_len = align_up(len, 512);
-	ssize_t rc;
-	if (trt::T::in_trt()) {
-		rc = trt::AIO::pread(get_tls_fd(), aligned_buf, len, offset);
-	} else {
-		rc = ::pread(fd_m, aligned_buf, len, offset);
-	}
+	ssize_t rc = ::pread(get_tls_fd(), aligned_buf, len, offset);
 	memcpy_buf_to_iov(aligned_buf, iov, iovcnt, len);
 	buf_on_stack_or_malloc_free(aligned_buf, len);
 	return aligned_len == rc ? len : rc;
@@ -176,47 +158,43 @@ ssize_t TrtFileIO::pwritev(const struct iovec *iov, int iovcnt, off_t offset)
 		return -1;
 	}
 	memcpy_iov_to_buf(iov, iovcnt, len, aligned_buf);
-	ssize_t rc;
-	if (trt::T::in_trt()) {
-		rc = trt::AIO::pwrite(get_tls_fd(), aligned_buf, len, offset);
-	} else {
-		rc = ::pwrite(fd_m, aligned_buf, len, offset);
-	}
+	ssize_t rc = ::pwrite(get_tls_fd(), aligned_buf, len, offset);
 	buf_on_stack_or_malloc_free(aligned_buf, len);
 	return rc;
 }
 
-ssize_t TrtFileIO::pread_native(Ptr buff, size_t len, off_t off)
+// Coroutine native IO — co_await AIO operations directly.
+trt::CoroTask TrtFileIO::pread_native(Ptr buff, size_t len, off_t off)
 {
 	if (trt::T::in_trt()) {
-		return trt::AIO::pread(get_tls_fd(), buff.ptr_m, len, off);
+		co_return (trt::RetT)(co_await trt::AIO::pread(get_tls_fd(), buff.ptr_m, len, off));
 	} else {
-		return ::pread(fd_m, buff.ptr_m, len, off);
+		co_return (trt::RetT)::pread(fd_m, buff.ptr_m, len, off);
 	}
 }
 
-ssize_t TrtFileIO::pwrite_native(Ptr buff, size_t len, off_t off)
+trt::CoroTask TrtFileIO::pwrite_native(Ptr buff, size_t len, off_t off)
 {
 	if (trt::T::in_trt()) {
-		return trt::AIO::pwrite(get_tls_fd(), buff.ptr_m, len, off);
+		co_return (trt::RetT)(co_await trt::AIO::pwrite(get_tls_fd(), buff.ptr_m, len, off));
 	} else {
-		return ::pwrite(fd_m, buff.ptr_m, len, off);
+		co_return (trt::RetT)::pwrite(fd_m, buff.ptr_m, len, off);
 	}
 }
 
-ssize_t TrtFileIO::preadv_native(IoVec<Ptr>  iov, off_t off) {
+trt::CoroTask TrtFileIO::preadv_native(IoVec<Ptr>  iov, off_t off) {
 	if (trt::T::in_trt()) {
-		return trt::AIO::preadv(get_tls_fd(), iov.iov_m, iov.iov_cnt_m, off);
+		co_return (trt::RetT)(co_await trt::AIO::preadv(get_tls_fd(), iov.iov_m, iov.iov_cnt_m, off));
 	} else {
-		return ::preadv(fd_m, iov.iov_m, iov.iov_cnt_m, off);
+		co_return (trt::RetT)::preadv(fd_m, iov.iov_m, iov.iov_cnt_m, off);
 	}
 }
 
-ssize_t TrtFileIO::pwritev_native(IoVec<Ptr> iov, off_t off) {
+trt::CoroTask TrtFileIO::pwritev_native(IoVec<Ptr> iov, off_t off) {
 	if (trt::T::in_trt()) {
-		return trt::AIO::pwritev(get_tls_fd(), iov.iov_m, iov.iov_cnt_m, off);
+		co_return (trt::RetT)(co_await trt::AIO::pwritev(get_tls_fd(), iov.iov_m, iov.iov_cnt_m, off));
 	} else {
-		return ::pwritev(fd_m, iov.iov_m, iov.iov_cnt_m, off);
+		co_return (trt::RetT)::pwritev(fd_m, iov.iov_m, iov.iov_cnt_m, off);
 	}
 }
 
@@ -228,8 +206,7 @@ void TrtFileIO::thread_init() {
 	trt_dmsg("spawing aio_poller\n");
 	trt::AIO::init();
 	trt_dmsg("state initialized=%d\n", trt::AIO::is_initialized());
-	trt::T::spawn(trt::AIO::poller_task, nullptr, nullptr, true, trt::TaskType::TASK);
-
+	trt::T::spawn_detached_no_wait(trt::AIO::poller_task, nullptr, trt::TaskType::TASK);
 }
 
 void TrtFileIO::thread_exit() {
@@ -246,11 +223,11 @@ TrtFileIO::mmap(void *const addr, size_t len, const int prot, const int flags, c
        void *const ptr = ::mmap(addr, len, prot|PROT_WRITE, flags | MAP_ANONYMOUS, -1, off);
        if (MAP_FAILED == ptr)
                return ptr;
+       // Use blocking preadv directly (not TRT async IO) since mmap is not in hot path.
        struct iovec iov[1] = {
 	       {.iov_base = ptr, .iov_len = len},
        };
-       IoVec<Ptr> iov_ptr(iov, 1);
-       const ssize_t rc = preadv_native(iov_ptr, off);
+       const ssize_t rc = ::preadv(get_tls_fd(), iov, 1, off);
        if ((ssize_t) len != rc) {
 	       UDEPOT_MSG("preadv failed  addr=%p len=%lu rc=%ld off=%lu err=%s.", ptr, len, rc, off, strerror(errno));
                const int rc2 __attribute__((unused)) = ::munmap(ptr, len);
@@ -286,7 +263,8 @@ TrtFileIO::msync(void *addr, size_t len, int flags)
 		return -1;
 	}
 
-	const ssize_t rc = pwrite(addr, len, f->second.off);
+	// Use blocking pwrite directly for msync (not in hot path).
+	const ssize_t rc = ::pwrite(get_tls_fd(), addr, len, f->second.off);
 	UDEPOT_MSG("msync pwrite addr=%p len=%lu rc=%ld off=%lu errno=%s.",
 		   addr, len, rc, f->second.off, strerror(errno));
 	return (ssize_t) len == rc ? 0 : ({errno = EIO; -1;});

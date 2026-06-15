@@ -15,6 +15,7 @@
 #include "uDepot/mbuff.hh"
 #include "uDepot/mbuff-alloc.hh"
 #include "util/debug.h"
+#include "trt/uapi/trt.hh"
 
 #include "kv.hh"
 
@@ -28,11 +29,12 @@ class KV_MbuffInterface : public virtual udepot::MbuffAllocIface {
 public:
 	enum PutOp { NORMAL, REPLACE, CREATE };
 
-	virtual int get(Mbuff const& key, Mbuff &val_out)  = 0;
+	// Returns error code via co_return (cast to trt::RetT).
+	virtual trt::CoroTask get(Mbuff const& key, Mbuff &val_out)  = 0;
 	// NB: keyval cannot be const& because put() needs to modify it to insert
 	// a metadata prefix and/or suffix.
-	virtual int put(Mbuff &keyval, size_t key_len, PutOp op = NORMAL)  = 0;
-	virtual int del(Mbuff const& key)  = 0;
+	virtual trt::CoroTask put(Mbuff &keyval, size_t key_len, PutOp op = NORMAL)  = 0;
+	virtual trt::CoroTask del(Mbuff const& key)  = 0;
 
 	virtual size_t get_kvmbuff_size() = 0;
 	// Optimization to avoid copy for PUTs when using IO operations that have
@@ -57,7 +59,7 @@ class KV_Mbuff : KV_MbuffInterface {
 public:
 	KV_Mbuff(KV &kv) : kv_m(kv) {}
 
-	virtual int get(Mbuff const& key_mbuff, Mbuff &val_out_mbuff) override {
+	virtual trt::CoroTask get(Mbuff const& key_mbuff, Mbuff &val_out_mbuff) override {
 		int err;
 		char *key = nullptr;
 		char *val = nullptr;
@@ -65,7 +67,6 @@ public:
 		size_t key_size, val_size, key_cp __attribute__((unused)),
 			x __attribute__((unused));
 
-		// val_out should not have any valid data
 		if (val_out_mbuff.get_valid_size() != 0) {
 			err = EINVAL;
 			goto end;
@@ -73,30 +74,20 @@ public:
 
 		key_size = key_mbuff.get_valid_size();
 		key = (char *)std::malloc(key_size);
-		if (!key) {
-			err = ENOMEM;
-			goto end;
-		}
+		if (!key) { err = ENOMEM; goto end; }
 
 		key_cp = key_mbuff.copy_to_buffer(0, key, key_size);
 		assert(key_cp == key_size);
 
 		val = (char *)std::malloc(val_buff_size);
-		if (!val) {
-			err = ENOMEM;
-			goto end;
-		}
+		if (!val) { err = ENOMEM; goto end; }
 
 		err = get_realloc(key, key_size, &val, val_buff_size, val_size);
-		if (err)
-			goto end;
+		if (err) goto end;
 		assert(val_size <= val_buff_size);
 
 		mbuff_add_buffers(val_out_mbuff, val_size);
-		if (val_out_mbuff.get_free_size() < val_size) {
-			err = ENOMEM;
-			goto end;
-		}
+		if (val_out_mbuff.get_free_size() < val_size) { err = ENOMEM; goto end; }
 
 		x = val_out_mbuff.append_from_buffer(val, val_size);
 		assert(x == val_size);
@@ -105,12 +96,12 @@ public:
 	end:
 		if (val) std::free(val);
 		if (key) std::free(key);
-		return err;
+		co_return (trt::RetT)(int)err;
 	}
 
 	virtual size_t putKeyvalPrefixSize() const override { return 0; }
 	virtual size_t putKeyvalSuffixSize() const override { return 0; }
-	virtual int put(Mbuff &keyval, size_t key_len, PutOp op) override {
+	virtual trt::CoroTask put(Mbuff &keyval, size_t key_len, PutOp op) override {
 		char *key = nullptr;
 		char *val = nullptr;
 		int err;
@@ -119,35 +110,27 @@ public:
 		size_t val_len = keyval.get_valid_size() - key_len;
 		key = static_cast<char *>(std::malloc(key_len));
 		val = static_cast<char *>(std::malloc(val_len));
-		if (!key || !val) {
-			err = ENOMEM;
-			goto end;
-		}
+		if (!key || !val) { err = ENOMEM; goto end; }
 
-		size_t copied;
-		copied = keyval.copy_to_buffer(0, key, key_len);
-		if (copied != key_len) {
-			UDEPOT_ERR("copied (%zd) =/= key_len (%zd)\n",  copied, key_len);
-			abort();
+		{
+			size_t copied;
+			copied = keyval.copy_to_buffer(0, key, key_len);
+			if (copied != key_len) { UDEPOT_ERR("copied =/= key_len"); abort(); }
+			copied = keyval.copy_to_buffer(key_len, val, val_len);
+			if (copied != val_len) { UDEPOT_ERR("copied =/= val_len"); abort(); }
 		}
-
-		copied = keyval.copy_to_buffer(key_len, val, val_len);
-		if (copied != val_len) {
-			UDEPOT_ERR("copied (%zd) =/= val_len (%zd)\n",  copied, val_len);
-			abort();
-		}
-
-		err = kv_m.put(key, key_len, val, val_len);
+		err = (int)(co_await kv_m.put(key, key_len, val, val_len));
 
 	end:
 		if (val) std::free(val);
 		if (key) std::free(key);
-		return err;
+		co_return (trt::RetT)(int)err;
 	}
 
-	virtual int del(Mbuff const& key) override {
+	virtual trt::CoroTask del(Mbuff const& key) override {
 		UDEPOT_ERR("%s:%d: NYI!", __PRETTY_FUNCTION__, __LINE__);
 		abort();
+		co_return 0;
 	}
 
 	std::type_index mbuff_type_index(void) override final {
@@ -192,7 +175,7 @@ private:
 		int err;
 		size_t val_size_read;
 
-		err = kv_m.get(key, key_size, *val_buff_ptr, val_buff_size, val_size_read, val_size);
+		err = (int)kv_m.get(key, key_size, *val_buff_ptr, val_buff_size, val_size_read, val_size).run_sync();
 		if (err)
 			return err;
 		if (val_size <= val_buff_size)
@@ -203,7 +186,7 @@ private:
 			return ENOMEM;
 		val_buff_size = val_size;
 
-		err = kv_m.get(key, key_size, *val_buff_ptr, val_buff_size, val_size_read, val_size);
+		err = (int)kv_m.get(key, key_size, *val_buff_ptr, val_buff_size, val_size_read, val_size).run_sync();
 		if (err) {
 			UDEPOT_MSG("get() returned: %s (%d)", strerror(err), err);
 		}

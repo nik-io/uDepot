@@ -221,7 +221,7 @@ void SocketServer::init_fds(void)
 int SocketServer::recv_from_client(int cli_fd)
 {
 	ConnectionSocket cli(cli_fd);
-	int err = serve_kv_request(cli, srv_kv_mbuff_m, srv_mbuff1_m, srv_mbuff2_m);
+	int err = (int)serve_kv_request(cli, srv_kv_mbuff_m, srv_mbuff1_m, srv_mbuff2_m).run_sync();
 	if (err)
 		remove_client(cli_fd);
 	// ECONNRESET is used to mark that we got an EOF. No real error.

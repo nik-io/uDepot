@@ -70,6 +70,13 @@ static inline uint64_t get_ticks(void)
 	} while (hi2 != hi);
 	return (uint64_t)hi * 1000000000 + lo;
 }
+#elif defined(__aarch64__)
+static inline uint64_t get_ticks(void)
+{
+	uint64_t t;
+	asm volatile("mrs %0, cntvct_el0" : "=r"(t));
+	return t;
+}
 #else
 #error "dont know how to count ticks"
 #endif

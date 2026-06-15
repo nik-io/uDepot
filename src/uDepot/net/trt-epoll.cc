@@ -78,20 +78,19 @@ public:
 	ConnectionTrtEpoll(ConnectionTrtEpoll const&) = delete;
 	void operator=(ConnectionTrtEpoll const&) = delete;
 
-	virtual ssize_t send(const void *buff, size_t len, int flags) override final {
-		return trt::Epoll::send(fd_, buff, len, flags);
+	virtual trt::CoroTask send(const void *buff, size_t len, int flags) override final {
+		co_return (trt::RetT)(co_await trt::Epoll::send(fd_, buff, len, flags));
 	}
-	virtual ssize_t recv(void *buff, size_t len, int flags) override final {
-		return trt::Epoll::recv(fd_, buff, len, flags);
-	}
-
-	virtual ssize_t sendmsg(const struct msghdr *msg, int flags) override final {
-		//flags |= MSG_ZEROCOPY;
-		return trt::Epoll::sendmsg(fd_, msg, flags);
+	virtual trt::CoroTask recv(void *buff, size_t len, int flags) override final {
+		co_return (trt::RetT)(co_await trt::Epoll::recv(fd_, buff, len, flags));
 	}
 
-	virtual ssize_t recvmsg(struct msghdr *msg, int flags) override final {
-		return trt::Epoll::recvmsg(fd_, msg, flags);
+	virtual trt::CoroTask sendmsg(const struct msghdr *msg, int flags) override final {
+		co_return (trt::RetT)(co_await trt::Epoll::sendmsg(fd_, msg, flags));
+	}
+
+	virtual trt::CoroTask recvmsg(struct msghdr *msg, int flags) override final {
+		co_return (trt::RetT)(co_await trt::Epoll::recvmsg(fd_, msg, flags));
 	}
 
 private:
@@ -164,7 +163,7 @@ int TrtEpollNet::global_exit(void) {
 
 TrtEpollServer::Conf::Conf() : listen_conf_m() { }
 
-static void *
+static trt::CoroTask
 task_serve(void *arg)
 {
 	int fd = (int)(uintptr_t)arg;
@@ -177,15 +176,13 @@ task_serve(void *arg)
 			break;
 		// if this happens too often, something's wrong. have a message for now
 		UDEPOT_MSG("Cannot get TaskArg. Yielding");
-		trt::T::yield();
+		co_await trt::T::yield();
 	}
 
 	ConnectionTrtEpoll cli(fd);
 	targ->peer_addr = sock_get_remote_address(fd);
 	for (;;) {
-		//DTRACE_PROBE1(udepot, trt_epoll_serve_entry, &trt::T::self());
-		int err = serve_kv_request(cli, targ->srv_kv, targ->mb1, targ->mb2);
-		//DTRACE_PROBE1(udepot, trt_epoll_serve_exit, &trt::T::self());
+		int err = (int)(co_await serve_kv_request(cli, targ->srv_kv, targ->mb1, targ->mb2));
 		if (err) {
 			if (ECONNRESET != err) {
 				UDEPOT_ERR("client %s:%s err=%d (%s)",
@@ -195,20 +192,16 @@ task_serve(void *arg)
 			}
 			break;
 		}
-		trt::T::yield();
+		co_await trt::T::yield();
 	}
 	UDEPOT_DBG("done serving");
 
-	// return the TaskArg in the pool
 	TaskArgPool__->put_arg(targ);
-
-	// we are done, close the fd via the epoll wrapper so that it will also
-	// de-register it.
 	trt::Epoll::close(fd);
-	return nullptr;
+	co_return 0;
 }
 
-static void *
+static trt::CoroTask
 task_accept(void *arg)
 {
 	int fd = (int)(uintptr_t)(arg);
@@ -218,10 +211,11 @@ task_accept(void *arg)
 		socklen_t cli_addr_len;
 
 		UDEPOT_DBG("accept\n");
-		int afd = trt::Epoll::accept_ll(fd, &cli_addr, &cli_addr_len);
+		int afd = (int)(co_await trt::Epoll::accept_ll(fd, &cli_addr, &cli_addr_len));
 		UDEPOT_DBG("accept returned: %d\n", afd);
 		if (afd == -1) {
 			perror("accept");
+			co_return 0;
 		}
 
 		// XXX: FIXME (abort)
@@ -240,7 +234,7 @@ task_accept(void *arg)
 		                               trt::Epoll::SpawnPolicy::Distribute);
 	}
 
-	return nullptr;
+	co_return 0;
 }
 
 // TrtEpollServer::Conf

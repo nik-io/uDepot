@@ -15,6 +15,7 @@
 #include "uDepot.hh"
 #include "frontends/usalsa++/SalsaCtlr.hh"
 #include "kv-mbuff.hh"
+#include "trt/uapi/trt.hh"
 
 #include <array>
 #include <atomic>
@@ -57,11 +58,11 @@ public:
 	int init_local(u32 gc_type, u32 gc_low_wm, u32 gc_high_wm);
 	int init() override final;
 	int shutdown() override final;
-	int get(const char key[], size_t key_size,
+	trt::CoroTask get(const char key[], size_t key_size,
 	        char val_buff[], size_t val_buff_size,
 	        size_t &val_size_read, size_t &val_size) override final;
-	int put(const char key[], size_t key_size, const char val[], size_t val_size) override final;
-	int del(const char key[], size_t key_size) override final;
+	trt::CoroTask put(const char key[], size_t key_size, const char val[], size_t val_size) override final;
+	trt::CoroTask del(const char key[], size_t key_size) override final;
 	// KV_MbuffInterface methods
 	size_t putKeyvalPrefixSize() const override final {
 		return sizeof(uDepotSalsaStore);
@@ -81,9 +82,9 @@ public:
 
 	// size_t putKeyvalPrefixSize() override final;
 	// size_t putKeyvalSuffixSize() override final;
-	int put(Mbuff &keyval, size_t key_len, PutOp op = NORMAL) override final;
-	int get(Mbuff const& key, Mbuff &val_out)  override final;
-	int del(Mbuff const& key)  override final;
+	trt::CoroTask put(Mbuff &keyval, size_t key_len, PutOp op = NORMAL) override final;
+	trt::CoroTask get(Mbuff const& key, Mbuff &val_out)  override final;
+	trt::CoroTask del(Mbuff const& key)  override final;
 
 	void thread_local_entry() override final;
 	void thread_local_exit() override final;
@@ -156,9 +157,9 @@ private:
 
 	// class members for member functions we need to pass to local_op_execute()
 	// (the goal is to avoid heap allocations on each operation)
-	std::function<int(uDepotSalsa<RT> *, u64, Mbuff const& , Mbuff &)> local_get_mbuff_m;
-	std::function<int(uDepotSalsa<RT> *, u64, Mbuff &, size_t , u64, PutOp, u64 *)> local_put_mbuff_m;
-	std::function<int(uDepotSalsa<RT> *, u64, Mbuff const&)> local_del_mbuff_m;
+	std::function<trt::CoroTask(uDepotSalsa<RT> *, u64, Mbuff const&, Mbuff &)> local_get_mbuff_m;
+	std::function<trt::CoroTask(uDepotSalsa<RT> *, u64, Mbuff &, size_t, u64, PutOp, u64 *)> local_put_mbuff_m;
+	std::function<trt::CoroTask(uDepotSalsa<RT> *, u64, Mbuff const&)> local_del_mbuff_m;
 
 	uDepotNet<typename RT::Net> net_m;
 
@@ -167,31 +168,38 @@ private:
 	int register_local_region() override;
 	int unregister_local_region() override;
 
-	bool is_pba_order_equal_to_total_order(u64, u64, const uDepotSalsaStore &) const;
+	bool is_pba_order_equal_to_total_order(u64, u64, const uDepotSalsaStoreHeader &) const;
 
 	// Mbuff versions of internal functions
 	int mbuff_prepend_append_md(Mbuff &keyval, u64 key_len, u64 val_len, u64 grain);
 	int mbuff_append_padding(Mbuff &keyval, u64 pad);
 	void set_mapping(u64 h, HashEntry *trgt, bool update, size_t key_len,
-			size_t val_len, uint64_t pba, uDepotSalsaStore const& old_kv_md);
+			size_t val_len, uint64_t pba, uDepotSalsaStoreHeader const& old_kv_md);
 	std::tuple<int, HashEntry *>
 	lookup_common(u64 h, u32 lookup_nr,
 		const std::array<u64, _UDEPOT_HOP_SCOTCH_BUCKET_SIZE> &pbas_visited);
 
-	std::tuple<int, size_t> lookup_mbuff(
+	// lookup_mbuff: co_returns 0; results via out params
+	trt::CoroTask lookup_mbuff(
 		u64 h, Mbuff const& mb, size_t mb_key_off,
-		size_t mb_key_len, Mbuff &mb_dst, HashEntry *);
-	std::tuple<int, HashEntry *> lookup_mbuff_put(
+		size_t mb_key_len, Mbuff &mb_dst, HashEntry *trgt_out,
+		int *err_out, size_t *val_size_out);
+	// lookup_mbuff_put: co_returns 0; results via out params
+	trt::CoroTask lookup_mbuff_put(
 		u64 h, Mbuff const& mb_key, size_t mb_key_off,
-		size_t mb_key_len, uDepotSalsaStore &old_kv_md, Mbuff &mb_dst);
-	std::tuple<int, u64> local_put_mbuff_io(u64 h, Mbuff &keyval, size_t key_size);
-	int local_put_mbuff(u64 h, Mbuff & keyval, size_t key_len, u64 grain, PutOp op, u64 *old_pba);
-	int local_get_mbuff(u64 key_hash, Mbuff const& key, Mbuff &val_out);
-	int local_del_mbuff(u64 h, Mbuff const& key);
+		size_t mb_key_len, uDepotSalsaStoreHeader &old_kv_md, Mbuff &mb_dst,
+		int *err_out, HashEntry **trgt_out);
+	// local_put_mbuff_io: co_returns 0; results via out params
+	trt::CoroTask local_put_mbuff_io(u64 h, Mbuff &keyval, size_t key_size,
+		int *err_out, u64 *grain_out);
+	// following functions co_return the int error code
+	trt::CoroTask local_put_mbuff(u64 h, Mbuff &keyval, size_t key_len, u64 grain, PutOp op, u64 *old_pba);
+	trt::CoroTask local_get_mbuff(u64 key_hash, Mbuff const& key, Mbuff &val_out);
+	trt::CoroTask local_del_mbuff(u64 h, Mbuff const& key);
 
-	// wrapper for executing local operations
+	// wrapper for executing local operations (all ops return trt::CoroTask)
 	template<typename F, typename... Args>
-	typename std::result_of<F(uDepotSalsa *, Args...)>::type
+	trt::CoroTask
 	local_op_execute(u64 h, F &&op, Args &&... a);
 
 	// GC
@@ -199,6 +207,7 @@ private:
 		uDepotSalsaStore md;
 	};
 	int gc_callback_base(u64 grain_start, u64 grain_nr);
+	// GC callbacks: co_return int error code
 	int local_gc_callback(u64 h, u64 start, const gc_unit *gcu, u64 &relocb, bool);
 	int local_gc_callback_mc(u64 h, u64 start, const gc_unit *gcu, u64 &relocb, bool);
 	inline uint32_t salsa_stream_get_id(u64);

@@ -22,13 +22,17 @@ namespace udepot {
 //
 //   If an EOF is received before the whole data is read, this is considered an
 //   error. -1 is returned and errno is set to ECONNRESET
+//
+// NB: Uses run_sync() to drive the CoroTask from recv() synchronously.
+//     Safe only for ConnectionSocket (never suspends). TRT coroutines must
+//     use co_await directly instead of calling recv_full().
 std::tuple<int, size_t>
 ConnectionBase::recv_full(void *buff_, size_t buff_size, int flags) {
-	int ret = 0; // will be returned if buff_size == 0
+	ssize_t ret = 0;
 	size_t data_read = 0;
 	char *buff = static_cast<char *>(buff_);
 	while (data_read != buff_size) {
-		ret = recv(buff + data_read, buff_size - data_read, flags);
+		ret = (ssize_t)recv(buff + data_read, buff_size - data_read, flags).run_sync();
 		if (ret < 0)
 			break;
 		if (ret == 0) {
@@ -47,12 +51,12 @@ ConnectionBase::recv_full(void *buff_, size_t buff_size, int flags) {
 //   returns error (-1 or 0) and how many data were sent
 std::tuple<int, size_t>
 ConnectionBase::send_full(const void *buff_, size_t buff_size, int flags) {
-	int ret = 0; // will be returned if buff_size == 0
+	ssize_t ret = 0;
 	size_t data_sent = 0;
 	const char *buff = static_cast<const char *>(buff_);
 	while (data_sent != buff_size) {
 		assert(data_sent < buff_size);
-		ret = send(buff + data_sent, buff_size - data_sent, flags);
+		ret = (ssize_t)send(buff + data_sent, buff_size - data_sent, flags).run_sync();
 		if (ret < 0)
 			break;
 
@@ -141,7 +145,7 @@ ssize_t ConnectionBase::sendv_full(struct iovec *iov, size_t iov_len) {
 		memset(&msghdr, 0, sizeof(msghdr));
 		msghdr.msg_iov = iov;
 		msghdr.msg_iovlen = iov_len;
-		ssize_t ret = sendmsg(&msghdr, 0);
+		ssize_t ret = (ssize_t)sendmsg(&msghdr, 0).run_sync();
 		if (ret < 0)
 			return ret;
 		send_bytes += ret;

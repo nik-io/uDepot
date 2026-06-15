@@ -67,45 +67,42 @@ LocalWaitset::set_ready() {
     return &lws_owner_;
 }
 
-LocalFutureBase *
-LocalWaitset::wait_() {
+FutureBase *
+LocalWaitset::try_wait_() {
     if (nfutures() == 0)
         return nullptr;
 
-    LocalFutureBase *ready_future;
-    assert(lws_state_ == State::INITIAL);
-	for (;;) {
-        for (FutureBase &f_base : lws_futures_registered_) {
-            LocalFutureBase *lf = static_cast<LocalFutureBase *>(&f_base);
-            //assert(dynamic_cast<LocalFutureBase *>(&f_base) != nullptr);
-            if (lf->is_ready()) {
-				lws_futures_registered_.erase(lws_futures_registered_.iterator_to(f_base));
-                ready_future = lf;
-                goto ready;
-            }
+    for (FutureBase &f_base : lws_futures_registered_) {
+        LocalFutureBase *lf = static_cast<LocalFutureBase *>(&f_base);
+        if (lf->is_ready()) {
+            lws_futures_registered_.erase(lws_futures_registered_.iterator_to(f_base));
+            lf->wait_completed();
+            return lf;
         }
+    }
 
-        while (lws_futures_unchecked_.size() > 0) {
-            FutureBase &f_base = lws_futures_unchecked_.front();
-            LocalFutureBase *lf = static_cast<LocalFutureBase *>(&f_base);
-            lws_futures_unchecked_.pop_front();
-            if (lf->is_ready_or_register()) {
-                ready_future = lf;
-                goto ready;
-            } else { // future not ready: registered
-                lws_futures_registered_.push_back(f_base);
-            }
+    while (lws_futures_unchecked_.size() > 0) {
+        FutureBase &f_base = lws_futures_unchecked_.front();
+        LocalFutureBase *lf = static_cast<LocalFutureBase *>(&f_base);
+        lws_futures_unchecked_.pop_front();
+        if (lf->is_ready_or_register()) {
+            lf->wait_completed();
+            return lf;
+        } else {
+            lws_futures_registered_.push_back(f_base);
         }
+    }
 
-		// switch to the scheduler and wait
-		localScheduler__->s_cmd_.set_wait(this);
-		localScheduler__->switch_to_sched_();
-		//trt_dmsg("WOKE UP FROM WAIT\n");
-	}
+    // No future ready; caller must sleep.
+    return nullptr;
+}
 
-ready:
-    ready_future->wait_completed();
-    return ready_future;
+LocalFutureBase *
+LocalWaitset::wait_() {
+    FutureBase *f;
+    while (!(f = try_wait_()))
+        ; // spin (should not be reached in coroutine-based TRT)
+    return static_cast<LocalFutureBase *>(f);
 }
 
 FutureBase *LocalWaitset::wait(void) {

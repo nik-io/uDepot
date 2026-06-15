@@ -14,16 +14,16 @@ using namespace trt;
 
 #define NUM (0x100)
 
-void *t2(void *arg) {
+CoroTask t2(void *arg) {
 	printf("%s\n", __PRETTY_FUNCTION__);
-	return nullptr;
+	co_return 0;
 }
 
-void *t1(void *arg)
+CoroTask t1(void *arg)
 {
 	printf("%s\n", __PRETTY_FUNCTION__);
-	T::spawn(t2, nullptr, nullptr, true);
-	return nullptr;
+	T::spawn_detached_no_wait(t2);
+	co_return 0;
 }
 
 int main(int argc, char *argv[])

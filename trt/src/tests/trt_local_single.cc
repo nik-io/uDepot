@@ -10,41 +10,41 @@
 
 #include "trt/uapi/trt.hh"
 
-void *
+trt::CoroTask
 waiter(void *arg) {
 	trt::LocalSingleAsyncObj *ao = static_cast<trt::LocalSingleAsyncObj *>(arg);
 	printf("%s: Calling wait\n", __PRETTY_FUNCTION__);
-	trt::RetT ret = trt::T::local_single_wait(ao);
+	trt::RetT ret = co_await trt::T::local_single_wait(ao);
 	printf("%s: 0x%lx\n", __PRETTY_FUNCTION__, ret);
-	return (void *)ret;
+	co_return ret;
 }
 
-void *
+trt::CoroTask
 notifier(void *arg) {
 	trt::LocalSingleAsyncObj *ao = static_cast<trt::LocalSingleAsyncObj *>(arg);
 	printf("%s: Calling notify\n", __PRETTY_FUNCTION__);
 	trt::T::local_single_notify(ao, 0xbeed);
-	return nullptr;
+	co_return 0;
 }
 
-void *
+trt::CoroTask
 main_task(void *arg) {
 	{
 		trt::LocalSingleAsyncObj ao;
-		trt::T::spawn(waiter, static_cast<void *>(&ao));
-		trt::T::spawn(notifier, static_cast<void *>(&ao));
-		trt::T::task_wait();
-		trt::T::task_wait();
+		co_await trt::T::spawn(waiter, static_cast<void *>(&ao));
+		co_await trt::T::spawn(notifier, static_cast<void *>(&ao));
+		co_await trt::T::task_wait();
+		co_await trt::T::task_wait();
 	}
 	printf("--\n");
 	{
 		trt::LocalSingleAsyncObj ao;
-		trt::T::spawn(notifier, static_cast<void *>(&ao));
-		trt::T::spawn(waiter, static_cast<void *>(&ao));
-		trt::T::task_wait();
-		trt::T::task_wait();
+		co_await trt::T::spawn(notifier, static_cast<void *>(&ao));
+		co_await trt::T::spawn(waiter, static_cast<void *>(&ao));
+		co_await trt::T::task_wait();
+		co_await trt::T::task_wait();
 	}
-	return nullptr;
+	co_return 0;
 }
 
 int main(int argc, char *argv[])

@@ -125,7 +125,7 @@ void
 rwlock_pagefault_trt::write_wait_readers()
 {
 	while (!rwlock_pagefault_base::wr_ready())
-			trt::T::yield();
+		sched_yield();
 }
 
 void

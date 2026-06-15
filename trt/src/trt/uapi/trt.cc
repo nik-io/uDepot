@@ -22,24 +22,63 @@ namespace trt {
 
 extern __thread Scheduler *localScheduler__;
 
-void
-T::spawn(TaskFn fn, TaskFnArg arg,
-         void *caller_ctx, bool detached, TaskType type) {
-    Task *t = T::alloc_task(fn,arg,caller_ctx,detached,type);
-    T::spawn_task(t);
+// ── Awaitables ───────────────────────────────────────────────────────────────
+
+YieldAwaitable T::yield() {
+    return YieldAwaitable{};
 }
 
-void T::remote_spawn(TaskFn fn, TaskFnArg fn_arg,
-                      void *ctx, bool detached,
-                     TaskType ty, RemoteSpawnPolicy p) {
-    Scheduler *s = localScheduler__;
-    s->s_cmd_.set_remote_spawn(fn, fn_arg, ctx, detached, ty, p);
-    s->switch_to_sched_();
+SpawnAwaitable T::spawn_task(Task *t) {
+    return SpawnAwaitable{t};
 }
+
+SpawnAwaitable T::spawn(TaskFn fn, TaskFnArg arg, void *caller_ctx,
+                        bool detached, TaskType type) {
+    Task *t = T::alloc_task(fn, arg, caller_ctx, detached, type);
+    return SpawnAwaitable{t};
+}
+
+SpawnManyAwaitable T::spawn_many(Task::List &tl) {
+    return SpawnManyAwaitable{tl};
+}
+
+WaitAwaitable T::wait_(WaitsetBase *ws) {
+    return WaitAwaitable{ws};
+}
+
+WaitAwaitable T::task_wait_() {
+    assert(dynamic_cast<Task *>(localScheduler__->s_current_) != nullptr);
+    Task *self = static_cast<Task *>(localScheduler__->s_current_);
+    return WaitAwaitable{&self->t_ws_};
+}
+
+TaskWaitAwaitable T::task_wait() {
+    assert(dynamic_cast<Task *>(localScheduler__->s_current_) != nullptr);
+    Task *self = static_cast<Task *>(localScheduler__->s_current_);
+    return TaskWaitAwaitable{&self->t_ws_};
+}
+
+TaskWaitAwaitable T::wait(WaitsetBase *ws) {
+    return TaskWaitAwaitable{ws};
+}
+
+LsaoAwaitable T::local_single_wait(LocalSingleAsyncObj *lsao) {
+    return LsaoAwaitable{lsao};
+}
+
+LsnSubmitAwaitable T::local_single_notify_submit() {
+    return LsnSubmitAwaitable{};
+}
+
+NotifySubmitAwaitable T::notify_submit() {
+    return NotifySubmitAwaitable{};
+}
+
+// ── Synchronous helpers ───────────────────────────────────────────────────────
 
 Task *
 T::alloc_task(TaskFn fn, TaskFnArg arg, void *caller_ctx,
-                    bool detached, TaskType type) {
+              bool detached, TaskType type) {
     Task *t;
     Scheduler *s = localScheduler__;
     if (s) { // we are in trt context
@@ -47,11 +86,8 @@ T::alloc_task(TaskFn fn, TaskFnArg arg, void *caller_ctx,
         Task *parent = static_cast<Task *>(parent_base);
         assert(dynamic_cast<Task *>(parent_base) != nullptr);
         s->task_alloc(&t, fn, arg, caller_ctx, parent, detached, type);
-        assert(!s->s_cmd_.is_set());
     } else {
-        // not in trt context. There is at least one case where we want to
-        // handle this properly: pushing tasks remotely to a trt scheduler
-        // without a trt context.
+        // not in trt context: remote task allocation
         Task *parent = nullptr;
         t = TaskAllocationQueue::task_alloc<Task>(fn, arg, caller_ctx, parent, detached, type);
     }
@@ -68,199 +104,103 @@ T::free_task(Task *t) {
     }
 }
 
-void
-T::spawn_task(Task *t) {
-    //trt_dmsg("%s (%p)\n", __PRETTY_FUNCTION__, t);
-    Scheduler *s = localScheduler__;
-    s->s_cmd_.set_spawn(t);
-    // NB: schedulers do not go away (see Controller), so this pointer
-    // should always be valid even if the scheduler has stopped.
-    s->switch_to_sched_();
-}
-
-void
-T::spawn_many(Task::List &tl) {
-    Scheduler *s = localScheduler__;
-    s->s_cmd_.set_spawn_many(tl);
-    s->switch_to_sched_();
-}
-
-Future *
-T::task_wait_(void) {
-    // NB: add a check in case we have multiple task types in the future
-    assert(dynamic_cast<Task *>(localScheduler__->s_current_) != nullptr);
-    Task *self = static_cast<Task *>(localScheduler__->s_current_);
-    return self->t_ws_.wait_();
-}
-
-std::tuple<RetT, void *>
-T::task_wait(void) {
-    Future *f = T::task_wait_();
-    assert(f->is_ready());
-    auto ret = std::make_tuple(f->get_val(), f->get_ctx());
-    f->drop_ref();
-    return ret;
-}
-
-FutureBase *
-T::wait_(WaitsetBase *ws) {
-    return ws->wait();
-}
-
-std::tuple<RetT, void *>
-T::wait(WaitsetBase *ws) {
-    FutureBase *f = T::wait_(ws);
-    assert(f->is_ready());
-    auto ret = std::make_tuple(f->get_val(), f->get_ctx());
-    f->drop_ref();
-    return ret;
-}
-
-void T::yield(void) {
-    //trt_dmsg("%s\n", __PRETTY_FUNCTION__);
-    Scheduler *s = localScheduler__;
-    assert(!s->s_cmd_.is_set());
-    s->s_cmd_.set_yield();
-    s->switch_to_sched_();
-}
-
 void T::notify(AsyncObjBase *ao, RetT val, NotifyPolicy p) {
-    //trt_dmsg("%s\n", __PRETTY_FUNCTION__);
-    Scheduler *s = localScheduler__;
-    assert(!s->s_cmd_.is_set());
-    s->s_cmd_.set_notify(ao, val, p);
-    s->switch_to_sched_();
+    localScheduler__->notify_(ao, val, p);
 }
 
-void T::notify_init(void) {
-    Scheduler *s = localScheduler__;
-    assert(!s->s_cmd_.is_set());
-    s->s_cmd_.init_notify();
+void T::notify_init() {
+    localScheduler__->s_notify_batch_.nargs = 0;
 }
 
 bool T::notify_add(AsyncObjBase *ao, RetT val, NotifyPolicy p) {
-    return localScheduler__->s_cmd_.notify_add(ao, val, p);
+    auto &batch = localScheduler__->s_notify_batch_;
+    size_t idx = batch.nargs;
+    if (idx >= TRT_MAX_NOTIFY_ARGS)
+        return false;
+    batch.args[idx] = std::make_tuple(ao, val, p);
+    batch.nargs = idx + 1;
+    return true;
 }
 
-void T::notify_submit(void) {
-    //trt_dmsg("%s\n", __PRETTY_FUNCTION__);
-    localScheduler__->switch_to_sched_();
+void T::local_single_notify_init() {
+    localScheduler__->s_lsn_batch_.nargs = 0;
 }
 
-RetT
-T::local_single_wait(LocalSingleAsyncObj *lsao) {
-
-    // printf("%s: ready: %u\n", __PRETTY_FUNCTION__, lsao->is_ready());
-    if (!lsao->is_ready()) {
-        Scheduler *s = localScheduler__;
-        lsao->set_waiter(s->s_current_);
-        s->s_cmd_.set_local_single_wait(lsao);
-        s->switch_to_sched_();
-        // we could loop if the lsao is not ready, but I cannot think of a
-        // reason why this would happen.
-        assert(lsao->is_ready());
-    }
-
-    return lsao->get_ret();
+bool T::local_single_notify_add(LocalSingleAsyncObj *lsao, RetT val) {
+    auto &batch = localScheduler__->s_lsn_batch_;
+    size_t idx = batch.nargs;
+    if (idx >= TRT_MAX_NOTIFY_ARGS)
+        return false;
+    batch.args[idx] = std::make_tuple(lsao, val);
+    batch.nargs = idx + 1;
+    return true;
 }
 
-void T::local_single_notify_init(void) {
+void T::local_single_notify(LocalSingleAsyncObj *lsao, RetT val) {
+    // Directly set the value and push the waiting task (no batch, no yield).
     Scheduler *s = localScheduler__;
-    assert(!s->s_cmd_.is_set());
-    s->s_cmd_.init_local_single_notify();
+    lsao->set_val(val);
+    TaskBase *waiter = lsao->take_waiter();
+    if (waiter != nullptr)
+        s->push_task_front(*waiter);
 }
 
-bool T::local_single_notify_add(LocalSingleAsyncObj *lsao, RetT ret) {
-    return localScheduler__->s_cmd_.local_single_notify_add(lsao, ret);
-}
-
-void T::local_single_notify_submit(void) {
-    localScheduler__->switch_to_sched_();
-}
-
-void T::local_single_notify(LocalSingleAsyncObj *lsao, RetT ret) {
-    //trt_dmsg("%s\n", __PRETTY_FUNCTION__);
-    T::local_single_notify_init();
-    T::local_single_notify_add(lsao, ret);
-    T::local_single_notify_submit();
-}
-
-#if 0
-void T::set_done(void) {
-    localScheduler__->s_ctl_.set_app_done();
-}
-
-bool T::is_done(void) {
-    return localScheduler__->s_ctl_.is_app_done();
-}
-#endif
-
-size_t T::rand(void) {
+size_t T::rand() {
     return localScheduler__->rand();
 }
 
-#if !defined(NDEBUG)
-uint64_t T::tid(void) {
-    Scheduler *s = localScheduler__;
-    if (s == NULL || s->s_current_ == NULL)
-        return (uint64_t)-1;
-    return s->s_current_->t_dbg_id_;
-}
-
-uint64_t T::sid(void) {
-    Scheduler *s = localScheduler__;
-    return s ? s->s_dbg_id_ : (uint64_t)-1;
-}
-#endif
-
-
-void task_return(RetT ret) {
-    //trt_dmsg("%s\n", __PRETTY_FUNCTION__);
-    Scheduler *s = localScheduler__;
-    assert(!s->s_cmd_.is_set());
-    s->s_cmd_.set_ret(ret);
-    s->switch_to_sched_();
-    fprintf(stderr, "Should not reach here");
-    abort();
-}
-
-void Task::dealloc_task__(AsyncObj *unused, void *t__) {
-    Task *t = static_cast<Task *>(t__);
-    //printf("%s\n", __PRETTY_FUNCTION__);
-    localScheduler__->task_free(t);
-}
-
-Task &T::self(void) {
-    //printf("===> S=%p\n", localScheduler__);
-    //printf("===> T=%p\n", localScheduler__->s_current_);
+Task &T::self() {
     assert(dynamic_cast<Task *>(localScheduler__->s_current_) != nullptr);
     Task *self = static_cast<Task *>(localScheduler__->s_current_);
     return *self;
 }
 
-void T::set_exit_all(void) {
+#if !defined(NDEBUG)
+uint64_t T::tid() {
+    Scheduler *s = localScheduler__;
+    if (s == nullptr || s->s_current_ == nullptr)
+        return (uint64_t)-1;
+    return s->s_current_->t_dbg_id_;
+}
+
+uint64_t T::sid() {
+    Scheduler *s = localScheduler__;
+    return s ? s->s_dbg_id_ : (uint64_t)-1;
+}
+#endif
+
+void T::set_exit_all() {
     localScheduler__->s_controller_.set_exit_all();
 }
 
-Scheduler *T::getS(void) {
+Scheduler *T::getS() {
     return localScheduler__;
 }
 
+void T::spawn_detached_no_wait(TaskFn fn, TaskFnArg arg, TaskType type) {
+    Task *t = alloc_task(fn, arg, nullptr, true, type);
+    t->set_state(Task::State::READY);
+    localScheduler__->push_task_front(*t);
+}
 
-} // end namespace trt
+void T::remote_spawn(TaskFn fn, TaskFnArg fn_arg, void *ctx, bool detached,
+                     TaskType ty, RemoteSpawnPolicy p) {
+    (void)fn; (void)fn_arg; (void)ctx; (void)detached; (void)ty; (void)p;
+    fprintf(stderr, "%s:%d: NYI!", __PRETTY_FUNCTION__, __LINE__);
+    abort();
+}
 
-extern "C" {
-
-// overload jctx_end() (which is a weak symbol)
-void jctx_end(void *ret)
-{
-    //dmsg("implicit task return\n");
-    trt::task_return((uint64_t)ret);
+void Task::dealloc_task__(AsyncObj *unused, void *t__) {
+    (void)unused;
+    Task *t = static_cast<Task *>(t__);
+    localScheduler__->task_free(t);
 }
 
 #if !defined(NDEBUG)
-uint64_t trt_dbg_get_tid(void) { return trt::T::tid(); }
-uint64_t trt_dbg_get_sid(void) { return trt::T::sid(); }
+extern "C" {
+uint64_t trt_dbg_get_tid() { return trt::T::tid(); }
+uint64_t trt_dbg_get_sid() { return trt::T::sid(); }
+}
 #endif
 
-} // end extern "C"
+} // end namespace trt

@@ -13,6 +13,7 @@
 #define	_KV_H_
 
 #include <cstddef>
+#include "trt/uapi/trt.hh"
 /**
  * Key Value provider base class, a pure interface
  * For an example implementation using this base class see uDepot.h under include/uDepot/
@@ -52,7 +53,8 @@ public:
 	 * error path return values:
 	 * EIO:     failed to perform get operation
 	 */
-	virtual int get(const char key[], size_t key_size,
+	// Returns error code via co_return (cast to trt::RetT).
+	virtual trt::CoroTask get(const char key[], size_t key_size,
 	                char *val_buff, size_t val_buff_size,
 	                size_t &val_size_read, size_t &val_size) = 0;
 
@@ -71,7 +73,7 @@ public:
 	 *         @val_size exceed the maximum supported size)
 	 * ENOSPC: no more space in the repository
 	 */
-	virtual int put(const char key[], size_t key_size, const char *val, size_t val_size) = 0;
+	virtual trt::CoroTask put(const char key[], size_t key_size, const char *val, size_t val_size) = 0;
 
 	/**
 	 * Delete a key value pair from the Key Value provider
@@ -85,7 +87,7 @@ public:
 	 * ENOSPC: no more space in the repository, could not perform
 	 *         the delete operation
 	 */
-	virtual int del(const char key[], size_t key_size) = 0;
+	virtual trt::CoroTask del(const char key[], size_t key_size) = 0;
 
 	virtual unsigned long get_size() const = 0;
 

@@ -448,42 +448,29 @@ uDepotSalsa<RT>::lookup_common(const u64 h, const u32 lookup_nr,
 
 template<typename RT>
 template<typename F, typename... Args>
-typename std::result_of<F(uDepotSalsa<RT> *, Args...)>::type
+trt::CoroTask
 uDepotSalsa<RT>::local_op_execute(u64 h, F &&op, Args &&... a)
 {
 	typename RT::RwpfTy *rwlpf = &map_m.dir_ref_m.rwpflock;
-	uDepotMap<RT> *udm = nullptr;
 
-	auto op_prepare = [this, h, rwlpf, &udm]() {
-		rwlpf->rd_enter();
-		assert(udm == nullptr);
-		udm = this->map_m.hash_to_map(h);
-		udm->lock(h);
-	};
+	rwlpf->rd_enter();
+	uDepotMap<RT> *udm = this->map_m.hash_to_map(h);
+	co_await udm->lock(h);
 
-	auto op_rollback = [h, rwlpf, &udm] {
-		assert(udm != nullptr);
-		udm->unlock(h);
-		rwlpf->rd_exit();
-		udm = nullptr;
-	};
+	// Run the operation; it may co_await IO and internally unlock/relock.
+	// By convention, op() re-acquires the lock before returning.
+	trt::RetT ret = co_await op(this, std::forward<Args>(a)...);
 
-	auto op_finalize = [h, rwlpf, &udm] {
-		udm->unlock(h);
-		rwlpf->rd_exit();
-	};
-
-	return rwlpf->rd_execute__(std::ref(op_prepare),
-	                           std::ref(op_rollback),
-	                           std::ref(op_finalize),
-	                           std::forward<F>(op), this, std::forward<Args>(a)...);
+	udm->unlock(h);
+	rwlpf->rd_exit();
+	co_return ret;
 }
 
 // TODO: create mbuffs out of thin air using @key and @val_buff when possible to
 // avoid copies.
 template<typename RT>
 __attribute__((warn_unused_result))
-int
+trt::CoroTask
 uDepotSalsa<RT>::get(const char key[],const size_t key_size,
                          char val_buff[], const size_t val_buff_size,
                          size_t &val_size_read, size_t &val_size)
@@ -512,10 +499,9 @@ uDepotSalsa<RT>::get(const char key[],const size_t key_size,
 		goto end;
 	}
 
-	err = get(*key_mb, *val_mb);
-	if (err) {
+	err = (int)(co_await get(*key_mb, *val_mb));
+	if (err)
 		goto end;
-	}
 
 	val_size = val_mb->get_valid_size();
 	val_size_read = val_mb->copy_to_buffer(0, val_buff, val_buff_size);
@@ -525,14 +511,14 @@ end:
 		mb_cache_m.mb_put(key_mb);
 	if (val_mb)
 		mb_cache_m.mb_put(val_mb);
-	return err;
+	co_return (trt::RetT)(int)err;
 }
 
 // TODO: create mbuffs out of thin air using @key and @val_buff when possible to
 // avoid copies.
 template<typename RT>
 __attribute__((warn_unused_result))
-int
+trt::CoroTask
 uDepotSalsa<RT>::put(const char key[], const size_t key_size, const char val[], const size_t val_size)
 {
 	int err;
@@ -542,8 +528,9 @@ uDepotSalsa<RT>::put(const char key[], const size_t key_size, const char val[], 
 	size_t copied;
 
 	Mbuff *kv = mb_cache_m.mb_get();
-	if (!kv)
-		return ENOMEM;
+	if (!kv) {
+		co_return (trt::RetT)(int)ENOMEM;
+	}
 
 	if (kv->get_free_size() < total_size) {
 		mbuff_add_buffers(*kv, total_size);
@@ -573,33 +560,33 @@ uDepotSalsa<RT>::put(const char key[], const size_t key_size, const char val[], 
 	// clear space for prefix, so that put() can prepend
 	kv->reslice(key_size + val_size, prefix_size);
 
-	err = put(*kv, key_size);
-
+	err = (int)(co_await put(*kv, key_size));
 
 #ifdef	_UDEPOT_DATA_DEBUG_VERIFY
-        {
-                char val_out[val_size];
-                size_t size_read, size_out;
-                int rc2 = get(key, key_size, val_out, val_size, size_read, size_out);
-                assert(0 == rc2 && size_read == val_size && size_out == size_read);
-                assert(0 == memcmp(val_out, val, val_size));
-        }
+	{
+		char val_out[val_size];
+		size_t size_read, size_out;
+		int rc2 = (int)(co_await get(key, key_size, val_out, val_size, size_read, size_out));
+		assert(0 == rc2 && size_read == val_size && size_out == size_read);
+		assert(0 == memcmp(val_out, val, val_size));
+	}
 #endif
 end:
 	mb_cache_m.mb_put(kv);
-	return err;
+	co_return (trt::RetT)(int)err;
 }
 
 template<typename RT>
 __attribute__((warn_unused_result))
-int
+trt::CoroTask
 uDepotSalsa<RT>::del(const char key[], const size_t key_size)
 {
 	int err;
 	size_t copied;
 	Mbuff *kv = mb_cache_m.mb_get();
-	if (!kv)
-		return ENOMEM;
+	if (!kv) {
+		co_return (trt::RetT)(int)ENOMEM;
+	}
 	if (kv->get_free_size() < key_size) {
 		mbuff_add_buffers(*kv, key_size);
 		if (kv->get_free_size() < key_size) {
@@ -614,11 +601,10 @@ uDepotSalsa<RT>::del(const char key[], const size_t key_size)
 		goto end;
 	}
 
-	err = del(*kv);
+	err = (int)(co_await del(*kv));
 end:
 	mb_cache_m.mb_put(kv);
-
-	return err;
+	co_return (trt::RetT)(int)err;
 }
 
 // for crash recovery
@@ -628,7 +614,7 @@ int uDepotSalsa<RT>::try_restore_entry(const uDepotSalsaStore &s, const u64 grai
 	HashEntry *trgt = nullptr;
 	const u64 h = HashFn::hash(s.buf, s.key_size);
 	uDepotMap<RT> *const udm = this->map_m.hash_to_map(h);
-	uDepotSalsaStore old_md = { 0 }; // only valid if key exists
+	uDepotSalsaStoreHeader old_md = { 0 }; // only valid if key exists
 	Mbuff *const keysrc = mb_cache_m.mb_get();
 	if (nullptr == keysrc) {
 		return ENOMEM;
@@ -651,8 +637,8 @@ int uDepotSalsa<RT>::try_restore_entry(const uDepotSalsaStore &s, const u64 grai
 		return ENOMEM;
 	}
 	int rc = 0;
-	udm->lock(h);
-	std::tie(rc, trgt) = lookup_mbuff_put(h, *keysrc, 0, s.key_size, old_md, *keymb);
+	udm->lock(h).run_sync();
+	lookup_mbuff_put(h, *keysrc, 0, s.key_size, old_md, *keymb, &rc, &trgt).run_sync();
 	udm->unlock(h);
 	mb_cache_m.mb_put(keymb);
 	mb_cache_m.mb_put(keysrc);
@@ -708,7 +694,6 @@ int uDepotSalsa<RT>::gc_callback_base(const u64 grain_start, const u64 grain_nr)
 {
 	const u64 end = (grain_start + grain_nr);
 	const u64 endb = end * grain_size_m;
-	auto op_gc = std::mem_fn(&uDepotSalsa::local_gc_callback);
 	uDepotSalsa::gc_unit gcu;
 	u64 relocb = 0;
 	int rc = 0;
@@ -731,8 +716,15 @@ int uDepotSalsa<RT>::gc_callback_base(const u64 grain_start, const u64 grain_nr)
 			break;
 		}
 		const u64 h = HashFn::hash(gcu.md.buf, gcu.md.key_size);
-
-		rc = local_op_execute(h, op_gc, h, start, &gcu, relocb, false);
+		{
+			typename RT::RwpfTy *rwlpf = &map_m.dir_ref_m.rwpflock;
+			rwlpf->rd_enter();
+			uDepotMap<RT> *udm = map_m.hash_to_map(h);
+			udm->lock_blocking(h);
+			rc = local_gc_callback(h, start, &gcu, relocb, false);
+			udm->unlock(h);
+			rwlpf->rd_exit();
+		}
 
 		start += kv_tot_grains_get(gcu.md.key_size, gcu.md.val_size);
 	}
@@ -769,7 +761,6 @@ int uDepotSalsa<RT>::gc_callback(u64 grain_start, const u64 grain_nr)
 		return rc;
 	}
 	u64 relocb = 0;
-	auto op_gc = std::mem_fn(&uDepotSalsa::local_gc_callback);
 	const char *const end = gc_region + gc_sizeb - sizeof(uDepotSalsaStore);
 	for (const char *p = gc_region; p < end && 0 == rc && !exit_gc_m;) {
 		const uDepotSalsa::gc_unit *const gcu = (const uDepotSalsa::gc_unit *) p;
@@ -782,8 +773,15 @@ int uDepotSalsa<RT>::gc_callback(u64 grain_start, const u64 grain_nr)
 		}
 
 		const u64 h = HashFn::hash(gcu->md.buf, gcu->md.key_size);
-
-		rc = local_op_execute(h, op_gc, h, grain_start, gcu, relocb, true);
+		{
+			typename RT::RwpfTy *rwlpf = &map_m.dir_ref_m.rwpflock;
+			rwlpf->rd_enter();
+			uDepotMap<RT> *udm = map_m.hash_to_map(h);
+			udm->lock_blocking(h);
+			rc = local_gc_callback(h, grain_start, gcu, relocb, true);
+			udm->unlock(h);
+			rwlpf->rd_exit();
+		}
 
 		grain_start += kv_tot_grains_get(gcu->md.key_size, gcu->md.val_size);
 		p           += kv_tot_bytes_get(gcu->md.key_size, gcu->md.val_size);
@@ -976,10 +974,11 @@ uDepotSalsa<RT>::seg_md_callback(const u64 grain_start, const u64 grain_nr)
 //    to place a new entry.
 //
 template<typename RT>
-std::tuple<int, size_t>
+trt::CoroTask
 uDepotSalsa<RT>::lookup_mbuff(
 	const u64 key_hash, Mbuff const& mb_key, const size_t mb_key_off,
-	const size_t mb_key_len, Mbuff &mb_dst, HashEntry *trgt_out)
+	const size_t mb_key_len, Mbuff &mb_dst, HashEntry *trgt_out,
+	int *err_out, size_t *val_size_out)
 {
 	int err;
 	uDepotMap<RT> *const udm = this->map_m.hash_to_map(key_hash);
@@ -989,37 +988,41 @@ uDepotSalsa<RT>::lookup_mbuff(
 	u32 lookup_nr = 0;
 	do {
 		std::tie(err, trgt) = lookup_common(key_hash, lookup_nr, pbas_visited);
-		if (0 != err)
-			return std::make_tuple(err, 0);
+		if (0 != err) {
+			*err_out = err; *val_size_out = 0;
+			co_return 0;
+		}
 		if (nullptr == trgt)
-			break;	// our work here is done, searched all possible matches
+			break;
 
 		trgtcpy = *trgt;
 		udm->unlock(key_hash);
 
 		const u64 offset = trgtcpy.pba * grain_size_m;
-		// compute IO size, reset and resize mbuff (if needed)
 		const u64 io_size = trgtcpy.kv_size * grain_size_m;
 		const u64 alignment = std::min(512UL, grain_size_m);
 		const u64 io_size_aligned = align_up(io_size, alignment);
 		mb_dst.reslice(0);
 		mbuff_add_buffers(mb_dst, io_size_aligned);
 		if (mb_dst.get_free_size() < io_size_aligned) {
-			UDEPOT_ERR("mbuff_add_buffers() failed: free:%zd needed:%zd\n", mb_dst.get_free_size(), io_size_aligned);
-			udm->lock(key_hash);
-			return std::make_tuple(ENOMEM, 0);
+			UDEPOT_ERR("mbuff_add_buffers() failed: free:%zd needed:%zd\n",
+				mb_dst.get_free_size(), io_size_aligned);
+			co_await udm->lock(key_hash);
+			*err_out = ENOMEM; *val_size_out = 0;
+			co_return 0;
 		}
 
-		// perform read
+		// perform read (lock is released during IO)
 		size_t bytes = 0;
-		std::tie(err, bytes) = io_pread_mbuff_append_full(udepot_io_m, mb_dst, io_size_aligned, offset);
+		co_await io_pread_mbuff_append_full(udepot_io_m, mb_dst, io_size_aligned, offset, &err, &bytes);
 		if (err) {
 			UDEPOT_ERR("reading into mbuff failed: %s (%d)", strerror(err), err);
-			udm->lock(key_hash);
-			return std::make_tuple(EIO, 0);
+			co_await udm->lock(key_hash);
+			*err_out = EIO; *val_size_out = 0;
+			co_return 0;
 		}
 		assert(io_size_aligned == bytes && bytes == mb_dst.get_valid_size());
-		uDepotSalsaStore md;
+		uDepotSalsaStoreHeader md;
 		mb_dst.copy_to_buffer(0, (void *) &md, sizeof(md));
 
 		#if !defined(NDEBUG)
@@ -1031,55 +1034,59 @@ uDepotSalsa<RT>::lookup_mbuff(
 		                                     mb_dst, putKeyvalPrefixSize(),
 		                                     mb_key_len);
 		if (match) {
-			// check size, might need to read more
 			if (unlikely(io_size != grain_size_m * kv_tot_grains_get(md.key_size, md.val_size))) {
 				u64 new_io_size = align_up(kv_tot_grains_get(md.key_size, md.val_size) * grain_size_m, alignment);
-				UDEPOT_DBG("KV size (%luB) at grain=%lu bigger than what's stored in the hash table (%luB).",
-					kv_tot_raw_bytes_get(md.key_size, md.val_size), offset / grain_size_m, trgtcpy.kv_size * grain_size_m);
-				UDEPOT_DBG("need to read more data");
+				UDEPOT_DBG("KV size (%luB) at grain=%lu bigger than hash table entry (%luB), reading more.",
+					kv_tot_raw_bytes_get(md.key_size, md.val_size), offset / grain_size_m,
+					trgtcpy.kv_size * grain_size_m);
 				mb_dst.reslice(0);
 				mbuff_add_buffers(mb_dst, new_io_size);
 				if (mb_dst.get_free_size() < new_io_size) {
 					UDEPOT_ERR("mbuff_add_buffers() failed: free:%zd needed:%zd\n",
 						mb_dst.get_free_size(), new_io_size);
-					udm->lock(key_hash);
-					return std::make_tuple(ENOMEM, 0);
+					co_await udm->lock(key_hash);
+					*err_out = ENOMEM; *val_size_out = 0;
+					co_return 0;
 				}
-				// TODO: read from where we left off
-				std::tie(err, bytes) = io_pread_mbuff_append_full(udepot_io_m, mb_dst, new_io_size, offset);
+				co_await io_pread_mbuff_append_full(udepot_io_m, mb_dst, new_io_size, offset, &err, &bytes);
 				if (err) {
 					UDEPOT_ERR("reading into mbuff failed: %s (%d)", strerror(err), err);
-					udm->lock(key_hash);
-					return std::make_tuple(EIO, 0);
+					co_await udm->lock(key_hash);
+					*err_out = EIO; *val_size_out = 0;
+					co_return 0;
 				}
 				assert(new_io_size == bytes && bytes == mb_dst.get_valid_size());
 				#if !defined(NDEBUG)
 				read_io_b_m.fetch_add(new_io_size, std::memory_order_relaxed);
 				#endif
 			}
-			udm->lock(key_hash);
+			co_await udm->lock(key_hash);
 			*trgt_out = trgtcpy;
-			return std::make_tuple(EEXIST, (u32) md.val_size);
+			*err_out = EEXIST;
+			*val_size_out = (u32)md.val_size;
+			co_return 0;
 		}
-		// update visited so far (this is to avoid double reading shifted entries)
 		update_visited_pba(trgtcpy.pba, lookup_nr, pbas_visited);
 		#if !defined(NDEBUG)
 		false_positive_lookups_m.fetch_add(1, std::memory_order_relaxed);
 		#endif
 
-		udm->lock(key_hash);
+		co_await udm->lock(key_hash);
 	} while (1);
 
-	return std::make_tuple(ENODATA, 0);
+	*err_out = ENODATA;
+	*val_size_out = 0;
+	co_return 0;
 }
 
 // Performs a lookup based on the given key for a put operations
 
 template<typename RT>
-std::tuple<int, HashEntry *>
+trt::CoroTask
 uDepotSalsa<RT>::lookup_mbuff_put(
 	const u64 key_hash, Mbuff const& mb_key, const size_t mb_key_off,
-	const size_t mb_key_len, uDepotSalsaStore &old_md, Mbuff &mb_dst)
+	const size_t mb_key_len, uDepotSalsaStoreHeader &old_md, Mbuff &mb_dst,
+	int *err_out, HashEntry **trgt_out)
 {
 	int err;
 	uDepotMap<RT> *const udm = this->map_m.hash_to_map(key_hash);
@@ -1088,38 +1095,43 @@ uDepotSalsa<RT>::lookup_mbuff_put(
 	u32 lookup_nr = 0;
 	do {
 		std::tie(err, trgt) = lookup_common(key_hash, lookup_nr, pbas_visited);
-		if (0 != err)
-			return std::make_tuple(err, trgt);
+		if (0 != err) {
+			*err_out = err; *trgt_out = trgt;
+			co_return 0;
+		}
 		if (nullptr == trgt)
-			break;	// our work here is done, searched all possible matches
+			break;
 
 		trgtcpy = *trgt;
 		udm->unlock(key_hash);
 
 		const u64 offset = trgtcpy.pba * grain_size_m;
-		// compute IO size, reset and resize mbuff (if needed)
 		const u64 io_size = putKeyvalPrefixSize() + mb_key_len;
 		const u64 alignment = std::min(512UL, grain_size_m);
 		const u64 io_size_aligned = align_up(io_size, alignment);
 		mb_dst.reslice(0);
 		mbuff_add_buffers(mb_dst, io_size_aligned);
 		if (mb_dst.get_free_size() < io_size_aligned) {
-			UDEPOT_ERR("mbuff_add_buffers() failed: free:%zd needed:%zd\n", mb_dst.get_free_size(), io_size_aligned);
-			udm->lock(key_hash);
-			return std::make_tuple(ENOMEM, nullptr);
+			UDEPOT_ERR("mbuff_add_buffers() failed: free:%zd needed:%zd\n",
+				mb_dst.get_free_size(), io_size_aligned);
+			co_await udm->lock(key_hash);
+			*err_out = ENOMEM; *trgt_out = nullptr;
+			co_return 0;
 		}
-		// perform read
-		std::tie(err, std::ignore) = io_pread_mbuff_append_full(udepot_io_m, mb_dst, io_size_aligned, offset);
+		// perform read (lock is released during IO)
+		size_t bytes_ignored;
+		co_await io_pread_mbuff_append_full(udepot_io_m, mb_dst, io_size_aligned, offset, &err, &bytes_ignored);
 		if (err) {
 			UDEPOT_ERR("reading into mbuff failed: %s (%d)", strerror(err), err);
-			udm->lock(key_hash);
-			return std::make_tuple(err, nullptr);
+			co_await udm->lock(key_hash);
+			*err_out = err; *trgt_out = nullptr;
+			co_return 0;
 		}
 		assert(io_size_aligned == mb_dst.get_valid_size());
 		#if !defined(NDEBUG)
 		read_io_b_m.fetch_add(io_size_aligned, std::memory_order_relaxed);
 		#endif
-		uDepotSalsaStore md;
+		uDepotSalsaStoreHeader md;
 		mb_dst.copy_to_buffer(0, (void *) &md, sizeof(md));
 		bool match = md.key_size == mb_key_len;
 		if (match)
@@ -1128,28 +1140,21 @@ uDepotSalsa<RT>::lookup_mbuff_put(
 							mb_key_len);
 		if (match)
 			old_md = md;
-		udm->lock(key_hash);
+		co_await udm->lock(key_hash);
 		// check if entry has changed
 		if (0 != memcmp(trgt, &trgtcpy, sizeof(*trgt))) {
-			// hash entry pointer changed, get its up-to-date version
 			trgt = map_m.lookup(key_hash, trgtcpy.pba);
-			// 3 cases:
-			// a) a delete happened
-			// b) another insert happened and updated the entry
-			if (match && nullptr == trgt) {
-				// our change has been superseded by a concurrent update
-				// return std::make_tuple(EALREADY, nullptr);
+			if (match && nullptr == trgt)
 				match = false; // continue search
-			}
-			// c) the entry has been shifted, continue as usual
 		}
 
-		if (match)
-			return std::make_tuple(EEXIST, trgt);
+		if (match) {
+			*err_out = EEXIST; *trgt_out = trgt;
+			co_return 0;
+		}
 
-		// update visited so far
 		update_visited_pba(trgtcpy.pba, lookup_nr, pbas_visited);
-	        #if !defined(NDEBUG)
+		#if !defined(NDEBUG)
 		false_positive_lookups_m.fetch_add(1, std::memory_order_relaxed);
 		#endif
 	} while (1);
@@ -1157,11 +1162,13 @@ uDepotSalsa<RT>::lookup_mbuff_put(
 	// No entry found. Try to allocate one.
 	err = map_m.next_free(key_hash, &trgt);
 	if (err) {
-		assert(err == ENOSPC); // currently that's the only error next_free() returns.
-		return std::make_tuple(ENOSPC, nullptr);
+		assert(err == ENOSPC);
+		*err_out = ENOSPC; *trgt_out = nullptr;
+		co_return 0;
 	}
 
-	return std::make_tuple(ENODATA, trgt);
+	*err_out = ENODATA; *trgt_out = trgt;
+	co_return 0;
 }
 
 template<typename RT>
@@ -1228,7 +1235,7 @@ uDepotSalsa<RT>::mbuff_prepend_append_md(Mbuff &keyval, const u64 key_size, cons
 template<typename RT>
 void uDepotSalsa<RT>::set_mapping(const u64 h, HashEntry *trgt, const bool update,
                                 const size_t key_len, const size_t val_len,
-                                const u64 pba, uDepotSalsaStore const& old_md)
+                                const u64 pba, uDepotSalsaStoreHeader const& old_md)
 {
 	if (update) { // update an existing entry
 		assert(trgt->used() && !trgt->deleted());
@@ -1299,60 +1306,53 @@ int uDepotSalsa<RT>::mbuff_append_padding(Mbuff &keyval, const u64 padding)
 //  - caller is expected to leave putKeyvalPrefixSize() at the begining of the
 //    buffer to prepend metadata
 template<typename RT>
-int
+trt::CoroTask
 uDepotSalsa<RT>::local_put_mbuff(
 	const u64 h, Mbuff &keyval, const size_t key_size,
 	const u64 grain, const PutOp op, u64 *const old_pba_out)
 {
 	int rc;
 	bool update = false;
-	HashEntry *trgt;
+	HashEntry *trgt = nullptr;
 	Mbuff key_mb(mbuff_type_index()); // (temp) Mbuff for reading key
 
 	// move free buffers from keyval to key_mb to do the lookup
-	// We do this to avoid buffer allocation in lookup_mbuff()
+	// We do this to avoid buffer allocation in lookup_mbuff_put()
 	size_t io_size = align_up(putKeyvalPrefixSize() + key_size, 512);
 	const size_t val_len = keyval.get_valid_size() - key_size;
 	keyval.move_free_buffs_to(key_mb, io_size);
 
-	// lookup key
-	uDepotSalsaStore old_md = { 0 }; // only valid if key exists
-	std::tie(rc, trgt) = lookup_mbuff_put(h, keyval, 0, key_size, old_md, key_mb);
+	uDepotSalsaStoreHeader old_md = { 0 }; // only valid if key exists
+	co_await lookup_mbuff_put(h, keyval, 0, key_size, old_md, key_mb, &rc, &trgt);
 	// no need for key_mb anymore. Move free buffs back to keyval
 	key_mb.reslice(0);
 	key_mb.move_free_buffs_to(keyval);
-	// if (UDEPOT_SALSA_MAX_KV_SIZE <= udiv_round_up(keyval.get_valid_size(), grain_size_m))
-	// 	UDEPOT_MSG("large KV pair with val size=%lu", val_len);
+
 	switch (rc) {
 	case ENODATA:		// not found
 		if (REPLACE == op)
-			return EINVAL; // new entry can safely be ignored
-		// if (trgt->deleted() && CREATE == op) {
-		// 	// TODO: unrealistic to read and verify for deleted entries
-		// }
+			co_return (trt::RetT)(int)EINVAL;
 		break;
 	case EEXIST:		// update
-		if (CREATE == op) {
-			return EINVAL; // new entry can safely be ignored
-		}
+		if (CREATE == op)
+			co_return (trt::RetT)(int)EINVAL;
 		update = true;
 		break;
 	case EIO:
 		UDEPOT_ERR("lookup returned err=%d", rc);
-		return rc;
+		co_return (trt::RetT)(int)rc;
 	case ENOSPC:
-		rc = map_m.try_shift(h , &trgt);
+		rc = map_m.try_shift(h, &trgt);
 		if (0 != rc)
-			return rc; // differentiate from ENOSPC from allocate_grains
+			co_return (trt::RetT)(int)rc;
 		// if shifted we have to invalidate its grains
 		assert(trgt->deleted() ^ !trgt->used());
 		if (REPLACE == op)
-			return EINVAL; // requests asked to replace an
-				       // existing key, key does not exist
+			co_return (trt::RetT)(int)EINVAL;
 		break;
 	default:
 		UDEPOT_ERR("lookup_mbuff returned %s (%d)", strerror(rc), rc);
-		return rc;
+		co_return (trt::RetT)(int)rc;
 	}
 
 	assert(trgt); // we have a new hash entry
@@ -1364,29 +1364,26 @@ uDepotSalsa<RT>::local_put_mbuff(
 	if (update) {
 		assert(trgt->used() && !trgt->deleted());
 		if (!is_pba_order_equal_to_total_order(trgt->pba, grain, old_md)) {
-//#ifdef DEBUG
 			const u64 old_pba = trgt->pba;
 			const u64 old_seg_idx = salsa::SalsaCtlr::grain_to_seg_idx(old_pba);
 			const u64 new_seg_idx = salsa::SalsaCtlr::grain_to_seg_idx(grain);
 			const u64 old_ts = old_md.timestamp;
 			const u64 new_ts = md_m.get_seg_ts(new_seg_idx);
-			UDEPOT_MSG("Race with another write/del: have to retry to preserve total order for restore"\
+			UDEPOT_MSG("Race with another write/del: have to retry to preserve total order for restore"
 				"new-pba=%lu old-pba=%lu new-seg=%lu old-seg=%lu new-ts=%lu old-ts=%lu tid=%u",
 				grain, old_pba, new_seg_idx, old_seg_idx, new_ts, old_ts, ThreadId::get());
-//#endif
 			*old_pba_out = trgt->pba;
-			return EALREADY; // race with GC => trigger switching to a new seg
+			co_return (trt::RetT)(int)EALREADY;
 		}
 	}
-	// set up propper mapping for the new key/val
 	set_mapping(h, trgt, update, key_size, val_len, grain, old_md);
-
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
-std::tuple<int, u64>
-uDepotSalsa<RT>::local_put_mbuff_io(const u64 h, Mbuff &keyval, const size_t key_size)
+trt::CoroTask
+uDepotSalsa<RT>::local_put_mbuff_io(const u64 h, Mbuff &keyval, const size_t key_size,
+	int *err_out, u64 *grain_out)
 {
 	assert(keyval.get_valid_size() >= key_size);
 
@@ -1396,60 +1393,60 @@ uDepotSalsa<RT>::local_put_mbuff_io(const u64 h, Mbuff &keyval, const size_t key
 	size_t io_size = keyval.get_valid_size() + putKeyvalPrefixSize() + putKeyvalSuffixSize();
 	size_t io_size_grains = udiv_round_up(io_size, grain_size_m);
 
-	// allocate storage space
-	u64 io_grain0; // first grain for the IO operation
+	u64 io_grain0;
 	err = salsa::SalsaCtlr::allocate_grains(io_size_grains, &io_grain0, salsa_stream_get_id(h));
 	if (err) {
 		if (EAGAIN != err)
 			UDEPOT_ERR("failed to allocate grains: %s (%d)", strerror(err), err);
-		return std::make_tuple(err, SALSA_INVAL_GRAIN);
+		*err_out = err; *grain_out = SALSA_INVAL_GRAIN;
+		co_return 0;
 	}
 
-	// append metadata to mbuff
 	err = mbuff_prepend_append_md(keyval, key_size, val_len, io_grain0);
 	if (err) {
 		UDEPOT_ERR("mbuff_prepend_append_md failed with %d", err);
 		salsa::SalsaCtlr::invalidate_grains(io_grain0, io_size_grains, false);
 		salsa::SalsaCtlr::release_grains(io_grain0, io_size_grains, salsa_stream_get_id(h));
-		return std::make_tuple(err, SALSA_INVAL_GRAIN);
+		*err_out = err; *grain_out = SALSA_INVAL_GRAIN;
+		co_return 0;
 	}
 	assert(keyval.get_valid_size() == putKeyvalPrefixSize() + key_size + val_len + putKeyvalSuffixSize());
 
-	// append necessary padding to the mbuff to align the IO write to grain size
 	err = mbuff_append_padding(keyval, io_size_grains*grain_size_m - io_size);
 	if (err) {
 		UDEPOT_ERR("mbuff_append_padding failed with %d", err);
 		salsa::SalsaCtlr::invalidate_grains(io_grain0, io_size_grains, false);
 		salsa::SalsaCtlr::release_grains(io_grain0, io_size_grains, salsa_stream_get_id(h));
-		return std::make_tuple(ENOMEM, SALSA_INVAL_GRAIN);
+		*err_out = ENOMEM; *grain_out = SALSA_INVAL_GRAIN;
+		co_return 0;
 	}
 
-	// perform write
 	assert(keyval.get_valid_size() == io_size_grains * grain_size_m);
-	size_t bytes;
-	std::tie(err, bytes) = io_pwrite_mbuff_full(
-	                                   udepot_io_m,
-	                                   keyval.get_valid_size(),
-	                                   io_grain0 * grain_size_m,
-	                                   keyval);
+	ssize_t bytes;
+	co_await io_pwrite_mbuff_full(udepot_io_m,
+	                              keyval.get_valid_size(),
+	                              io_grain0 * grain_size_m,
+	                              keyval, &err, &bytes);
 	if (err) {
 		UDEPOT_ERR("io_pwrite_mbuff_full of mbuff failed: %s (%d) off=%lu size=%lu",
 			strerror(errno), err, io_grain0 * grain_size_m, keyval.get_valid_size());
 		salsa::SalsaCtlr::invalidate_grains(io_grain0, io_size_grains, false);
 		salsa::SalsaCtlr::release_grains(io_grain0, io_size_grains, salsa_stream_get_id(h));
-		return std::make_tuple(0 < errno ? errno : err, io_grain0);
+		*err_out = 0 < errno ? errno : err; *grain_out = io_grain0;
+		co_return 0;
 	}
-	assert(bytes == io_size_grains * grain_size_m);
+	assert((size_t)bytes == io_size_grains * grain_size_m);
 	#if !defined(NDEBUG)
 	write_io_b_m.fetch_add(keyval.get_valid_size(), std::memory_order_relaxed);
 	#endif
-	return std::make_tuple(0, io_grain0);
+	*err_out = 0; *grain_out = io_grain0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((warn_unused_result))
 bool
-uDepotSalsa<RT>::is_pba_order_equal_to_total_order(const u64 old_pba, const u64 new_pba, const uDepotSalsaStore &old_md) const
+uDepotSalsa<RT>::is_pba_order_equal_to_total_order(const u64 old_pba, const u64 new_pba, const uDepotSalsaStoreHeader &old_md) const
 {
 	const u64 old_seg_idx = scm_m->grain_to_seg_idx(old_pba);
 	const u64 new_seg_idx = scm_m->grain_to_seg_idx(new_pba);
@@ -1466,13 +1463,13 @@ uDepotSalsa<RT>::is_pba_order_equal_to_total_order(const u64 old_pba, const u64 
 
 template<typename RT>
 __attribute__((warn_unused_result))
-int
+trt::CoroTask
 uDepotSalsa<RT>::put(Mbuff &keyval, const size_t key_size, const PutOp op)
 {
 	u64 h;
 	int rc = HashFn::hash(h, keyval, 0, key_size);
 	if (rc)
-		return rc;
+		co_return (trt::RetT)(int)rc;
 
 	typename RT::Net::Client *client = get_client(h);
 	UDEPOT_DBG("PUT key_size=%lu h=%lu client:%p.", key_size, h, client);
@@ -1483,43 +1480,40 @@ uDepotSalsa<RT>::put(Mbuff &keyval, const size_t key_size, const PutOp op)
 		PROBE_TICKS_START(remote_put_mbuff);
 		int xret = client->remote_put(keyval, key_size);
 		PROBE_TICKS_END(remote_put_mbuff);
-		return xret;
+		co_return (trt::RetT)(int)xret;
 	}
-	// 1. allocate a grain and do the lock-free write I/O: it's out of place
 	const size_t size = keyval.get_valid_size();
 	u64 grain = SALSA_INVAL_GRAIN;
 	const u64 size_grains = kv_tot_grains_get(key_size, size - key_size);
-	// 1. allocate a grain and do the lock-free write I/O: it's out of place
 	do {
 		do {
-			std::tie(rc, grain) = local_put_mbuff_io(h, keyval, key_size);
+			int io_err; u64 io_grain;
+			co_await local_put_mbuff_io(h, keyval, key_size, &io_err, &io_grain);
+			rc = io_err; grain = io_grain;
 			keyval.reslice(size, putKeyvalPrefixSize());
 			if (EAGAIN == rc) {
 				UDEPOT_DBG("received EAGAIN, sleeping and re-trying");
-				//std::this_thread::sleep_for(std::chrono::milliseconds(1));
-				RT::Sched::yield();
+				co_await RT::Sched::yield();
 				continue;
 			}
 			if (0 != rc) {
 				UDEPOT_ERR("local put io returned %d", rc);
-				return rc;
+				co_return (trt::RetT)(int)rc;
 			}
 		} while (EAGAIN == rc);
 		assert(SALSA_INVAL_GRAIN != grain);
-		// auto st_start = uDepotStats::put_start();
 		PROBE_TICKS_START(local_put_mbuff);
 		do {
-			u64 old_pba = -1;
-			rc = local_op_execute(h, local_put_mbuff_m, h, keyval, key_size, grain, op, &old_pba);
+			u64 old_pba = -1ULL;
+			rc = (int)(co_await local_op_execute(h, local_put_mbuff_m, h, keyval, key_size, grain, op, &old_pba));
 			switch (rc) {
 			case 0:
-				break;	// good path
+				break;
 			case EINVAL:
-				break;	// REPLACE or CREATE was requested
+				break;	// REPLACE or CREATE semantic rejected
 			case ENOSPC:
 			{
 				const int rc2 = map_m.grow();
-				// retry if grow() succeeded or returned EAGAIN
 				if (0 == rc2 || EAGAIN == rc2)
 					rc = EAGAIN;
 				else
@@ -1528,9 +1522,7 @@ uDepotSalsa<RT>::put(Mbuff &keyval, const size_t key_size, const PutOp op)
 			}
 			case EALREADY:
 			{
-				// total order not preserved, have to retry write on new
-				// location, otherwise crash recovery will not work in a
-				// consistent manner
+				// total order not preserved, retry write on new location
 				const u64 old_seg_idx = salsa::SalsaCtlr::grain_to_seg_idx(old_pba);
 				const u64 new_seg_idx = salsa::SalsaCtlr::grain_to_seg_idx(grain);
 				if (old_seg_idx != new_seg_idx) {
@@ -1544,23 +1536,21 @@ uDepotSalsa<RT>::put(Mbuff &keyval, const size_t key_size, const PutOp op)
 				UDEPOT_ERR("local_put failed with %s", strerror(rc));
 			}
 		} while (EAGAIN == rc);
-		if (0 != rc) {
-			// grain won't be used, invalidate
+		if (0 != rc)
 			salsa::SalsaCtlr::invalidate_grains(grain, size_grains, false);
-		}
 		salsa::SalsaCtlr::release_grains(grain, size_grains, salsa_stream_get_id(h));
 	} while (EALREADY == rc);
-	// uDepotStats::put_stop(st_start);
 	PROBE_TICKS_END(local_put_mbuff);
 
-	return rc;
+	co_return (trt::RetT)(int)rc;
 }
 
 template<typename RT>
-int uDepotSalsa<RT>::local_get_mbuff(const u64 key_hash, Mbuff const& key, Mbuff &val_out)
+trt::CoroTask
+uDepotSalsa<RT>::local_get_mbuff(const u64 key_hash, Mbuff const& key, Mbuff &val_out)
 {
 	int err;
-	size_t val_size;
+	size_t val_size = 0;
 	HashEntry trgt(0, 0);
 
 	#if !defined(NDEBUG)
@@ -1568,29 +1558,27 @@ int uDepotSalsa<RT>::local_get_mbuff(const u64 key_hash, Mbuff const& key, Mbuff
 	#endif
 
 	const size_t key_size = key.get_valid_size();
-	std::tie(err, val_size) = lookup_mbuff(key_hash, key, 0, key_size, val_out, &trgt);
+	co_await lookup_mbuff(key_hash, key, 0, key_size, val_out, &trgt, &err, &val_size);
 	if (err == EEXIST) {
-		// if sucessful, reslice val_out to point to value
-		const u64 alignment __attribute__((unused)) = std::min(512UL, grain_size_m);
 		err = 0;
 		assert(0 < val_size);
 		assert(trgt.kv_size <= val_out.get_valid_size() / grain_size_m);
 		val_out.reslice(val_size, putKeyvalPrefixSize() + key_size);
 	} else
-		val_out.reslice(0); // val_out holds no valid data
+		val_out.reslice(0);
 
-	return err;
+	co_return (trt::RetT)(int)err;
 }
 
 template<typename RT>
 __attribute__((warn_unused_result))
-int
+trt::CoroTask
 uDepotSalsa<RT>::get(Mbuff const& key, Mbuff &val_out)
 {
 	u64 h;
 	int err = HashFn::hash(h, key);
 	if (err)
-		return err;
+		co_return (trt::RetT)(int)err;
 
 	typename RT::Net::Client *cli = get_client(h);
 	UDEPOT_DBG("GET key_size=%lu h=%lu cli=%p.", key.get_valid_size(), h, cli);
@@ -1598,22 +1586,16 @@ uDepotSalsa<RT>::get(Mbuff const& key, Mbuff &val_out)
 		#if !defined(NDEBUG)
 		remote_get_nr_m.fetch_add(1);
 		#endif
-		//STimer t("REMOTE GET");
 		PROBE_TICKS_START(remote_get_mbuff);
 		int xret = cli->remote_get(key, val_out);
 		PROBE_TICKS_END(remote_get_mbuff);
-		return xret;
+		co_return (trt::RetT)(int)xret;
 	}
 
-	// auto st_start = uDepotStats::get_start();
 	PROBE_TICKS_START(local_get_mbuff);
-
-	//STimer t("LOCAL GET");
-	auto ret = local_op_execute(h, local_get_mbuff_m, h, key, val_out);
-
-	// uDepotStats::get_stop(st_start);
+	trt::RetT ret = co_await local_op_execute(h, local_get_mbuff_m, h, key, val_out);
 	PROBE_TICKS_END(local_get_mbuff);
-	return ret;
+	co_return ret;
 }
 
 // Perform an DEL operation
@@ -1621,95 +1603,95 @@ uDepotSalsa<RT>::get(Mbuff const& key, Mbuff &val_out)
 // The key Mbuff contains the key
 //
 template<typename RT>
-int
+trt::CoroTask
 uDepotSalsa<RT>::local_del_mbuff(const u64 h, Mbuff const &key)
 {
-	// local del
-	// map lookup (read I/O in case we have one or more partial matches)
 	int rc;
 	HashEntry *trgt = nullptr;
 	Mbuff key_mb(mbuff_type_index()); // (temp) Mbuff for reading key
 	const size_t key_size = key.get_valid_size();
 	const size_t io_size = align_up(putKeyvalPrefixSize() + key_size + putKeyvalSuffixSize(), 512);
-	uDepotSalsaStore old_md = { 0 }; // only valid if key exists
+	uDepotSalsaStoreHeader old_md = { 0 }; // only valid if key exists
+	uDepotMap<RT> *const udm = this->map_m.hash_to_map(h);
 	#if !defined(NDEBUG)
-	local_del_nr_m.fetch_add(1, std::memory_order_relaxed); // NB: This will also count rollbacks
+	local_del_nr_m.fetch_add(1, std::memory_order_relaxed);
 	#endif
 	key.move_free_buffs_to(key_mb, io_size);
-	std::tie(rc, trgt) = lookup_mbuff_put(h, key, 0, key_size, old_md, key_mb);
+	co_await lookup_mbuff_put(h, key, 0, key_size, old_md, key_mb, &rc, &trgt);
 	if (EEXIST != rc) {
-		// DEL will not do anything in this case: key was not found
 		key_mb.reslice(0);
 		key_mb.move_free_buffs_to(key);
 		switch (rc) {
 		case ENOSPC:
 			UDEPOT_DBG("lookup returned err=%d", rc);
-			return ENODATA;	// this is same as ENODATA for DEL, didn't find it
+			co_return (trt::RetT)(int)ENODATA;
 		case EIO:
 			UDEPOT_ERR("lookup returned EIO err=%d", rc);
 		case ENODATA:
-			return rc;
+			co_return (trt::RetT)(int)rc;
 		default:
 			assert(0);
 		}
-		return ENOENT;
+		co_return (trt::RetT)(int)ENOENT;
 	}
-	assert(trgt); // we have a new hash entry
+	assert(trgt);
 
-	// allocate and write tombstone
 	assert(key_mb.get_valid_size() >= putKeyvalPrefixSize() + key_size);
 	u64 grain = SALSA_INVAL_GRAIN;
-	u32 __attribute__((unused)) retries = 0;
 	const u64 size_grains = kv_tot_grains_get(key_size, 0);
 
+	// Release map lock for tombstone IO (lock was held by lookup_mbuff_put on return)
+	udm->unlock(h);
 	do {
 		key_mb.reslice(key_size, putKeyvalPrefixSize());
-		std::tie(rc, grain) = local_put_mbuff_io(h, key_mb, key_size);
+		int io_err; u64 io_grain;
+		co_await local_put_mbuff_io(h, key_mb, key_size, &io_err, &io_grain);
+		rc = io_err; grain = io_grain;
 		if (EAGAIN == rc) {
 			UDEPOT_DBG("received EAGAIN, sleeping and re-trying");
-			RT::Sched::yield();
+			co_await RT::Sched::yield();
 		}
 	} while (EAGAIN == rc);
 	key_mb.reslice(0);
 	key_mb.move_free_buffs_to(key);
+
+	// Re-acquire map lock before returning (local_op_execute expects it held)
+	co_await udm->lock(h);
+
 	if (0 != rc) {
 		UDEPOT_ERR("local put io returned %s (%d)", strerror(rc), rc);
-		return rc;
+		co_return (trt::RetT)(int)rc;
 	}
 
 	assert(SALSA_INVAL_GRAIN != grain);
 
-	// TODO: retry if not in order
 	if (!is_pba_order_equal_to_total_order(trgt->pba, grain, old_md)) {
-		return EAGAIN;
+		co_return (trt::RetT)(int)EAGAIN;
 	}
 
-	// invalidate previous mapping
 	const u64 old_grains = kv_tot_grains_get(old_md.key_size, old_md.val_size);
 	const u64 old_tot_bytes = kv_tot_bytes_get(old_md.key_size, old_md.val_size);
 	const u64 old_raw_bytes = kv_raw_bytes_get(old_md.key_size, old_md.val_size);
 	assert(0 < old_grains);
 	salsa::SalsaCtlr::invalidate_grains(trgt->pba, old_grains, false);
 
-	// update stats
 	kv_removed(old_raw_bytes, old_tot_bytes);
-	// update shared mapping table
 	map_m.remove(h, trgt, grain);
 
 	salsa::SalsaCtlr::release_grains(grain, size_grains, salsa_stream_get_id(h));
 
-	return 0;
+	co_return 0;
 }
 
 template<typename RT>
 __attribute__((warn_unused_result))
-int
+trt::CoroTask
 uDepotSalsa<RT>::del(Mbuff const& key)
 {
 	u64 h;
 	int rc = HashFn::hash(h, key);
 	if (unlikely(rc))
-		return rc;
+		co_return (trt::RetT)(int)rc;
 
 	typename RT::Net::Client *cli = get_client(h);
 	UDEPOT_DBG("DEL key_size=%lu h=%lu cli=%p.", key.get_valid_size(), h, cli);
@@ -1717,26 +1699,23 @@ uDepotSalsa<RT>::del(Mbuff const& key)
 		#if !defined(NDEBUG)
 		remote_get_nr_m.fetch_add(1);
 		#endif
-		//STimer t("REMOTE GET");
 		PROBE_TICKS_START(remote_del_mbuff);
 		int xret = cli->remote_del(key);
 		PROBE_TICKS_END(remote_del_mbuff);
-		return xret;
+		co_return (trt::RetT)(int)xret;
 	}
 	PROBE_TICKS_START(local_del_mbuff);
-	//STimer t("LOCAL GET");
 	do {
-		rc = local_op_execute(h, local_del_mbuff_m, h, key);
+		rc = (int)(co_await local_op_execute(h, local_del_mbuff_m, h, key));
 		if (0 != rc) {
 			if (EAGAIN == rc)
-				RT::Sched::yield();
+				co_await RT::Sched::yield();
 			else
 				UDEPOT_ERR("del returned %s", strerror(rc));
 		}
 	} while (EAGAIN == rc);
 	PROBE_TICKS_END(local_del_mbuff);
-	return rc;
-
+	co_return (trt::RetT)(int)rc;
 }
 
 template<typename RT>

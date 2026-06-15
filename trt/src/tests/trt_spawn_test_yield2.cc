@@ -17,28 +17,27 @@ using namespace trt;
 
 #define NUM (0x100)
 
-void *t2(void *arg) {
-
+CoroTask t2(void *arg) {
 	trt_dmsg("yielding\n");
-	T::yield();
+	co_await T::yield();
 	trt_dmsg("returning\n");
-	return nullptr;
+	co_return 0;
 }
 
-void *t1(void *arg)
+CoroTask t1(void *arg)
 {
 	trt_dmsg("spawning t2\n");
-	T::spawn(t2, arg, nullptr);
+	co_await T::spawn(t2, arg, nullptr);
 	trt_dmsg("spawning t2 (again)\n");
-	T::spawn(t2, arg, nullptr);
+	co_await T::spawn(t2, arg, nullptr);
 
 	trt_dmsg("waiting #1\n");
-	T::task_wait();
+	co_await T::task_wait();
 	trt_dmsg("waiting #2\n");
-	T::task_wait();
+	co_await T::task_wait();
 
 	trt_dmsg("returning\n");
-	return nullptr;
+	co_return 0;
 }
 
 int main(int argc, char *argv[])

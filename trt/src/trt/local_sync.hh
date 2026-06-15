@@ -59,6 +59,9 @@ class LocalWaitset : public LocalWaitsetBase {
 
     virtual TaskBase *set_ready(void);
 
+    // Non-blocking scan: returns ready LocalFutureBase* or nullptr (must sleep).
+    virtual FutureBase *try_wait_() override;
+
     FutureBase *wait(void);
     LocalFutureBase *wait_(void);
 

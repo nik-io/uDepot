@@ -282,9 +282,10 @@ void MemcacheServer::handle_request_thread(s32 cfd, std::atomic<u32> *active, co
 		buff.reset();
 		mbuff.reslice(0);
 
-		memcache::cmd cmd = memcache::parser::read_cmd(scon, buff);
+		memcache::cmd cmd(buff);
+		memcache::parser::read_cmd(scon, buff, cmd).run_sync();
 		if (0 == cmd.err_) {
-			cmd.handle(scon, srv_kv_mbuff_m, mb_cache_m, mbuff, keymbuff);
+			cmd.handle(scon, srv_kv_mbuff_m, mb_cache_m, mbuff, keymbuff).run_sync();
 			if (0 == cmd.err_)
 				continue;
 		}

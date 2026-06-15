@@ -14,9 +14,10 @@
 #define _UDEPOT_NET_CONCEPTS_HH_
 
 // Playing around with C++ concepts.
-// Requires a recent gcc (6.1?) and -fconcepts
+// Requires GCC concepts TS (-fconcepts, pre-C++20). Not valid in C++20 which
+// uses a different syntax, so exclude when __cpp_concepts >= C++20 value.
 
-#if defined(__cpp_concepts)
+#if defined(__cpp_concepts) && __cpp_concepts < 201900L
 
 #include "kv-mbuff.hh"
 #include "kv-concepts.hh"
@@ -108,7 +109,7 @@ concept bool Net() {
 #endif
 
 template<typename T>
-#if defined(__cpp_concepts)
+#if defined(__cpp_concepts) && __cpp_concepts < 201900L
 requires Net<T>()
 #endif
 constexpr bool NetCheck() {return true;}

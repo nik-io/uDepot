@@ -108,7 +108,7 @@ int main(int argc, char *argv[])
 	size_t off = 0, rem = total_size;
 	while (rem > 0) {
 		IO::Ptr slice((char *)buff.ptr_m + off, rem);
-		ssize_t ret = io.pwrite_native(std::move(slice), rem, off);
+		ssize_t ret = (ssize_t)io.pwrite_native(std::move(slice), rem, off).run_sync();
 		if (ret < 0) {
 			perror("pwrite_native");
 			exit(1);
@@ -124,9 +124,9 @@ int main(int argc, char *argv[])
 
 	udepot::Mbuff mb = create_mbuff<IO>(buff_size, nbuffs);
 
-	int err;
-	size_t bytes_read;
-	std::tie(err, bytes_read) = udepot::io_pread_mbuff_append_full(io, mb, total_size, 0);
+	int err = 0;
+	size_t bytes_read = 0;
+	udepot::io_pread_mbuff_append_full(io, mb, total_size, 0, &err, &bytes_read).run_sync();
 	if (err) {
 		fprintf(stderr, "io_pread_mbuff_append_full() returned err: %s (%d)\n", strerror(err), err);
 		exit(1);

@@ -13,13 +13,10 @@
 #ifndef TRT_TASK_BASE_HH
 #define TRT_TASK_BASE_HH
 
+#include <coroutine>
 #include <cstdint>
 #include <boost/intrusive/list.hpp>
 namespace bi = boost::intrusive;
-
-extern "C" {
-    #include "jctx/jctx.h"
-}
 
 namespace trt {
 
@@ -28,17 +25,13 @@ class AsyncObjBase;
 class TaskQueueThreadUnsafe;
 class T;
 
+using RetT = uint64_t;
+
 // Task types
-// POLL:   Tasks that poll I/O devices (e.g., network or storage). They are
-//         responsible for creating new tasks.
-// TASK:  short-running tasks, typically created to serve requests
-//
-// The distinction between these types is not fundamental. It is made in the
-// hope that it will be usefull for tuning the scheduler (e.g., throughput vs
-// latency). I believe we should rethink/generalize this.
+// POLL:   Tasks that poll I/O devices (e.g., network or storage).
+// TASK:   short-running tasks, typically created to serve requests
 enum class TaskType {POLL, TASK, NR_};
 
-// number of task types
 constexpr size_t nTaskTypes() { return static_cast<size_t>(TaskType::NR_); }
 
 class TaskBase {
@@ -58,9 +51,12 @@ protected:
     bi::list_member_hook<> t_lhook_; // list hook for scheduler
     TaskType t_type_;
     Scheduler *t_last_scheduler;     // last scheduler that scheduled the task
-    jctx_t t_jctx_;
+    std::coroutine_handle<> t_handle_;        // top-level coroutine frame
+    std::coroutine_handle<> t_current_coro_; // leaf coroutine to resume (updated at each true suspension)
     TaskBase *t_parent_;             // parent task (or NULL)
-    bool t_detached_;                // is task detached? (i.e., noone will wait for it)
+    bool t_detached_;                // is task detached?
+    RetT t_ret_ = 0;                 // return value set by promise_type::return_value
+
     #if !defined(NDEBUG)
     State t_state_;
     uint64_t t_dbg_id_;
@@ -78,6 +74,10 @@ public:
         #endif
     }
 
+    void set_ret(RetT val) noexcept { t_ret_ = val; }
+    TaskType get_type() const noexcept { return t_type_; }
+    void set_current_coro(std::coroutine_handle<> h) noexcept { t_current_coro_ = h; }
+
 protected:
     TaskBase(TaskBase *parent, bool t_detached, TaskType type);
 public:
@@ -86,13 +86,7 @@ public:
     void operator=(TaskBase const &) = delete;
 
     virtual ~TaskBase();
-    // return pointer to the underlying async object for the return value of
-    // this task
     virtual AsyncObjBase *get_ret_ao() = 0;
-    // To make some operations easier, we assume that each task holds its own
-    // (default) waitset.
-    // (not yet used)
-    // virtual WaitsetBase  *get_default_waitset();
 };
 
 } // end trt namespace

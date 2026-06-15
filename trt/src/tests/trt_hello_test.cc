@@ -12,10 +12,10 @@
 
 using namespace trt;
 
-void *hello_task(void *arg)
+CoroTask hello_task(void *arg)
 {
 	printf("Hello: %p\n", arg);
-	return (void *)0xdeed;
+	co_return 0xdeed;
 }
 
 int main(int argc, char *argv[])

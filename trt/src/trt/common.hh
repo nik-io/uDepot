@@ -13,15 +13,9 @@
 #ifndef TRT_COMMON_HH_
 #define TRT_COMMON_HH_
 
-#include <cinttypes>
-
-namespace trt {
-
-using RetT      = uint64_t;
-using TaskFnArg = void *;
-using TaskFn    = void *(*)(TaskFnArg);
-
-} // end namespace trt
-
+// RetT and TaskType are defined in task_base.hh (included transitively).
+// TaskFnArg and TaskFn (CoroTask-based) are defined in task.hh.
+// This header is kept for backward compat; include task_base.hh directly for RetT.
+#include "trt/task_base.hh"
 
 #endif // TRT_COMMON_HH_

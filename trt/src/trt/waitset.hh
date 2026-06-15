@@ -58,9 +58,13 @@ class Waitset : public WaitsetBase {
     TaskBase *set_ready(void) override;
 
    public:
+    // Non-blocking scan: returns a ready Future* or nullptr (must sleep).
+    // Handles REDO races internally. Leaves state as SCANNING when returning nullptr.
+    Future *try_wait_() override;
+
     /*
      * Check if there are ready futures. If waitset is empty return nullptr.
-     * If no futures are ready, defer execution.
+     * If no futures are ready, defer execution (co_await WaitAwaitable).
      * Return a ready Future, otherwise.
      *
      * It races with multiple set_ready_() calls.

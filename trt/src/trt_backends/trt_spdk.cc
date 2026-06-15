@@ -10,7 +10,6 @@
 
 // vim: set expandtab softtabstop=4 tabstop=4 shiftwidth=4:
 
-
 #include "trt/uapi/trt.hh"
 #include "trt_backends/trt_spdk.hh"
 
@@ -24,83 +23,32 @@ SpdkState *get_tls_SpdkState__() {
     return &SpdkState__;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SPDK IO callback — called from execute_completions() in poller_task context.
+// Uses direct notify so the woken task is pushed to the run queue immediately.
+// ─────────────────────────────────────────────────────────────────────────────
 void
 SPDK::spdk_io_cb(void *ctx, const struct spdk_nvme_cpl *cpl)
 {
     LocalSingleAsyncObj *lsao = static_cast<LocalSingleAsyncObj *>(ctx);
     SpdkQpair *qp = (SpdkQpair *)lsao->lsao_user_data_;
 
-    // see SpdkQpair::execute_completions()
     qp->npending_dec(1);
     T::io_npending_dec(1);
 
-    // Return whether there was an error or not (not sure if we can get more
-    // information out of SPDK).
     RetT val = spdk_nvme_cpl_is_error(cpl) ? -1 : 0;
-
-    // callback is expected to be executed in the context of the poller_task,
-    // which we assume it has called T::notify_init() before this function is
-    // called, and will call T::notify_submit() after.
-    bool ret = T::local_single_notify_add(lsao, val);
-    if (!ret) { // flush notifications and retry
-        T::local_single_notify_submit();
-        T::local_single_notify_init();
-        ret = T::local_single_notify_add(lsao, val);
-        assert(ret);
-    }
+    T::local_single_notify(lsao, val);
 }
 
-
-ssize_t
-SPDK::read(SpdkQpair *qp, SpdkPtr &buff, uint64_t lba, uint32_t lba_cnt) {
-
-    LocalSingleAsyncObj lsao;
-    lsao.lsao_user_data_ = (uintptr_t)(qp);
-
-    // trt_dmsg("Submitting RD on qp=%p lba=%lu cnt=%u\n", qp, lba, lba_cnt);
-    const int rc = qp->submit_read(buff, lba, lba_cnt, spdk_io_cb, &lsao);
-    if (0 != rc)
-	    return -1;
-    T::io_npending_inc(1);
-    RetT err = T::local_single_wait(&lsao);
-    return err ? -1 : lba_cnt;
-}
-
-ssize_t
-SPDK::write(SpdkQpair *qp, SpdkPtr &buff, uint64_t lba, uint32_t lba_cnt) {
-    LocalSingleAsyncObj lsao;
-    lsao.lsao_user_data_ = (uintptr_t)(qp);
-    #if !defined(NDEBUG)
-    uint64_t sid0 = T::sid();
-    #endif
-    // trt_dmsg("Submitting WR on qp=%p lba=%lu cnt=%u\n", qp, lba, lba_cnt);
-    const int rc = qp->submit_write(buff, lba, lba_cnt, spdk_io_cb, &lsao);
-    if (0 != rc)
-	    return -1;
-
-    T::io_npending_inc(1);
-    RetT err = T::local_single_wait(&lsao);
-    #if !defined(NDEBUG)
-    uint64_t sid1 = T::sid();
-    if (sid0 != sid1) {
-        fprintf(stderr, "Woke up on a different scheduler (old:%lu vs new:%lu)!  qp=%p ao.ao_user_data_=%p\n", sid0, sid1, qp, (void *)lsao.lsao_user_data_);
-        abort();
-    }
-    #endif
-    return err ? -1 : lba_cnt;
-}
-
-//
-// Simple (i.e,. allocation + copy) preadv/pwrite implementations
-//
-
+// ─────────────────────────────────────────────────────────────────────────────
+// LBA range helper
+// ─────────────────────────────────────────────────────────────────────────────
 static inline size_t
 iovec_len(const struct iovec *iov, unsigned iovcnt)
 {
     size_t ret = 0;
-    for (unsigned i=0; i < iovcnt; i++) {
+    for (unsigned i = 0; i < iovcnt; i++)
         ret += iov[i].iov_len;
-    }
     return ret;
 }
 
@@ -109,117 +57,159 @@ get_lba_range(uint64_t offset, uint64_t length, size_t block_size)
 {
     size_t lba_start = offset / block_size;
     size_t lba_end   = (offset + length + block_size - 1) / block_size;
-    return std::make_tuple(lba_start, lba_end);
+    return {lba_start, lba_end};
 }
 
-// will allocate a new buffer for SPDK I/O
-ssize_t SPDK::preadv(SpdkQpair *qp, const struct iovec *iov, size_t iovcnt, off_t off)
+// ─────────────────────────────────────────────────────────────────────────────
+// SpdkRawAwaitable — for SPDK::read / SPDK::write
+// ─────────────────────────────────────────────────────────────────────────────
+bool SpdkRawAwaitable::await_ready() noexcept
 {
-    uint64_t b                   = qp->get_sector_size();
-    uint64_t iovlen              = iovec_len(iov, iovcnt);
-    uint64_t lba_start, lba_end;
-    std::tie(lba_start, lba_end) = get_lba_range(off, iovlen, b);
-    uint64_t nlbas               = lba_end - lba_start;
+    lsao_.lsao_user_data_ = (uintptr_t)(qp_);
+    int rc;
+    if (op_ == Op::READ)
+        rc = qp_->submit_read(buff_, lba_, lba_cnt_, SPDK::spdk_io_cb, &lsao_);
+    else
+        rc = qp_->submit_write(buff_, lba_, lba_cnt_, SPDK::spdk_io_cb, &lsao_);
 
-    // allocate SPDK buffer
-    SpdkPtr buff = std::move(qp->alloc_buffer(nlbas));
-    if (!buff.ptr_m) {
-        errno = ENOMEM;
+    if (rc != 0) { rc_ = rc; ready_ = true; return true; }
+    T::io_npending_inc(1);
+    ready_ = lsao_.is_ready();
+    return ready_;
+}
+
+bool SpdkRawAwaitable::await_suspend(std::coroutine_handle<> h) noexcept
+{
+    TaskBase *t = localScheduler__->s_current_;
+    t->set_current_coro(h);
+    lsao_.set_waiter(t);
+    return true;
+}
+
+ssize_t SpdkRawAwaitable::await_resume() noexcept
+{
+    if (rc_ != 0) return -1;
+    RetT err = lsao_.get_ret();
+    return err ? -1 : (ssize_t)lba_cnt_;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SpdkIOAwaitable — for SPDK::pread/pwrite/preadv/pwritev
+// ─────────────────────────────────────────────────────────────────────────────
+bool SpdkIOAwaitable::await_ready() noexcept
+{
+    uint64_t b = qp_->get_sector_size();
+    bool is_write = (op_ == Op::PWRITE || op_ == Op::PWRITEV);
+
+    // determine total length and lba range
+    size_t total_len;
+    if (op_ == Op::PREAD || op_ == Op::PWRITE) {
+        total_len = len_;
+    } else {
+        total_len = iovec_len(iov_, iovcnt_);
+    }
+    iovlen_ = total_len;
+
+    uint64_t lba_end;
+    std::tie(lba_start_, lba_end) = get_lba_range(off_, total_len, b);
+    nlbas_ = lba_end - lba_start_;
+
+    // allocate SPDK-DMA buffer
+    spdk_buff_ = std::move(qp_->alloc_buffer(nlbas_));
+    if (!spdk_buff_.ptr_m) { rc_ = -ENOMEM; ready_ = true; return true; }
+
+    // lsao_user_data_ must be set before submit so spdk_io_cb can read it
+    lsao_.lsao_user_data_ = (uintptr_t)(qp_);
+
+    // for writes: copy user data into the SPDK buffer
+    if (is_write) {
+        size_t copy_start = (size_t)(off_ - lba_start_ * b);
+        if (copy_start != 0) {
+            fprintf(stderr, "SpdkIOAwaitable: NYI: unaligned write (RMW first block)\n");
+            abort();
+        }
+        if ((lba_start_ + nlbas_) * b != (uint64_t)off_ + total_len) {
+            fprintf(stderr, "SpdkIOAwaitable: NYI: unaligned write (RMW last block)\n");
+            abort();
+        }
+        if (op_ == Op::PWRITE) {
+            struct iovec iov = {buf_, len_};
+            spdk_buff_.copy_from_iovec(0, &iov, 1);
+        } else {
+            spdk_buff_.copy_from_iovec(0, iov_, iovcnt_);
+        }
+        int rc = qp_->submit_write(spdk_buff_, lba_start_, nlbas_,
+                                   SPDK::spdk_io_cb, &lsao_);
+        if (rc != 0) {
+            qp_->free_buffer(std::move(spdk_buff_));
+            rc_ = rc; ready_ = true; return true;
+        }
+    } else {
+        int rc = qp_->submit_read(spdk_buff_, lba_start_, nlbas_,
+                                  SPDK::spdk_io_cb, &lsao_);
+        if (rc != 0) {
+            qp_->free_buffer(std::move(spdk_buff_));
+            rc_ = rc; ready_ = true; return true;
+        }
+    }
+
+    T::io_npending_inc(1);
+    ready_ = lsao_.is_ready();
+    return ready_;
+}
+
+bool SpdkIOAwaitable::await_suspend(std::coroutine_handle<> h) noexcept
+{
+    TaskBase *t = localScheduler__->s_current_;
+    t->set_current_coro(h);
+    lsao_.set_waiter(t);
+    return true;
+}
+
+ssize_t SpdkIOAwaitable::await_resume() noexcept
+{
+    if (rc_ != 0) return -1;
+
+    RetT err = lsao_.get_ret();
+    if (err) {
+        if (spdk_buff_.ptr_m) qp_->free_buffer(std::move(spdk_buff_));
         return -1;
     }
 
-    uint64_t nlbas_wr = SPDK::read(qp, buff, lba_start, nlbas);
-    if (nlbas_wr != nlbas) {
-        // remove this once everything works
-        fprintf(stderr, "WARNING: partial read %lu vs %lu LBAS", nlbas, nlbas_wr);
-        qp->free_buffer(std::move(buff));
-        errno = EIO;
-        return -1;
+    ssize_t result;
+    bool is_read = (op_ == Op::PREAD || op_ == Op::PREADV);
+    if (is_read) {
+        // copy from SPDK buffer into user buffer
+        uint64_t b = qp_->get_sector_size();
+        size_t copy_start = (size_t)(off_ - lba_start_ * b);
+        if (op_ == Op::PREAD) {
+            struct iovec iov = {buf_, len_};
+            spdk_buff_.copy_to_iovec((off_t)copy_start, &iov, 1);
+        } else {
+            spdk_buff_.copy_to_iovec((off_t)copy_start, iov_, iovcnt_);
+        }
     }
+    result = (ssize_t)iovlen_;
 
-    // where does the first LBA go
-    size_t copy_start = off - lba_start*b;
-    // copy iovec to the buffer
-    assert(copy_start + iovlen <= nlbas*b);
-    buff.copy_to_iovec(copy_start, iov, iovcnt);
-
-    qp->free_buffer(std::move(buff));
-    return iovlen;
+    if (spdk_buff_.ptr_m) qp_->free_buffer(std::move(spdk_buff_));
+    return result;
 }
 
-// will allocate a new buffer for SPDK I/O
-ssize_t
-SPDK::pwritev(SpdkQpair *qp, const struct iovec *iov, int iovcnt, off_t off) {
-    uint64_t b                   = qp->get_sector_size();
-    uint64_t iovlen              = iovec_len(iov, iovcnt);
-    uint64_t lba_start, lba_end;
-    std::tie(lba_start, lba_end) = get_lba_range(off, iovlen, b);
-    uint64_t nlbas               = lba_end - lba_start;
-
-    //trt_dmsg("%s: enter\n", __PRETTY_FUNCTION__);
-    // allocate SPDK buffer
-    SpdkPtr buff = std::move(qp->alloc_buffer(nlbas));
-    if (!buff.ptr_m) {
-        errno = ENOMEM;
-        return -1;
-    }
-
-    // where does the first LBA go in the buffer
-    size_t copy_start = off - lba_start*b;
-    // RMW the first block if needed
-    if (copy_start != 0) {
-        fprintf(stderr, "NYI: RMW off=%zd len=%lu block_size=%lu", off, iovlen, b);
-        abort();
-    }
-
-    // RMW the last block if needed
-    if ((lba_start + nlbas)*b != off + iovlen) {
-        fprintf(stderr, "NYI: RMW off=%zd len=%lu block_size=%lu", off, iovlen, b);
-        abort();
-    }
-
-    // copy iovec to the buffer
-    assert(copy_start + iovlen <= nlbas*b);
-    buff.copy_from_iovec(copy_start, iov, iovcnt);
-
-    uint64_t nlbas_wr = SPDK::write(qp, buff, lba_start, nlbas);
-    if (nlbas_wr != nlbas) {
-        // remove this once everything works
-        fprintf(stderr, "WARNING: partial write %lu vs %lu LBAS\n", nlbas, nlbas_wr);
-    }
-
-    // buff.free();
-    qp->free_buffer(std::move(buff));
-    return iovlen;
-}
-
-
-ssize_t SPDK::pread(SpdkQpair *qp, void *buff, size_t len, off_t off) {
-    struct iovec iov = (struct iovec){.iov_base = buff, .iov_len = len};
-    return SPDK::preadv(qp, &iov, 1, off);
-}
-
-ssize_t SPDK::pwrite(SpdkQpair *qp, const void *buff, size_t len, off_t off) {
-    struct iovec iov = (struct iovec){.iov_base = (void *)buff, .iov_len = len};
-    return SPDK::pwritev(qp, &iov, 1, off);
-}
-
-void *
-SPDK::poller_task(void *unused) {
-
-    //trt_dmsg("%s: enter\n", __PRETTY_FUNCTION__);
+// ─────────────────────────────────────────────────────────────────────────────
+// SPDK poller task — drives SPDK completions and yields cooperatively.
+// ─────────────────────────────────────────────────────────────────────────────
+CoroTask SPDK::poller_task(void *unused)
+{
     while (!SpdkState__.is_done()) {
-        T::local_single_notify_init();
-        SpdkState__.execute_completions();
-        T::local_single_notify_submit();
+        SpdkState__.execute_completions();  // calls spdk_io_cb → T::local_single_notify
+        co_await T::yield();
     }
-    //trt_dmsg("%s: exit\n", __PRETTY_FUNCTION__);
-    return nullptr;
+    co_return 0;
 }
 
-/**
- * RteController
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// RteController
+// ─────────────────────────────────────────────────────────────────────────────
 
 static int
 scheduler_rte_thread(void *arg)
@@ -229,61 +219,52 @@ scheduler_rte_thread(void *arg)
     scheduler->set_state_running();
     scheduler->pthread_barrier_wait();
     scheduler->start_();
-	return 0;
+    return 0;
 }
-
 
 void
 RteController::spawn_scheduler(TaskFn main_fn, TaskFnArg main_arg,
-                                TaskType main_type,
-	                            unsigned lcore)
+                                TaskType main_type, unsigned lcore)
 {
     Scheduler *s;
     cpu_set_t cpuset;
 
-    // I don't think the cpuset is going to be used, but since we can provide a
-    // reasonable argument, let's do it.
     CPU_ZERO(&cpuset);
     CPU_SET(lcore, &cpuset);
 
     if (0) {
-        // TODO: schedulers_ is intended to only grow. If a scheduler
-        // exits, it's state will be set to DONE, but its resources will
-        // remain available At this point, we can search the schedulers_
-        // vector for a DONE scheduler to reset.
     } else {
         schedulers_.emplace_back(*this, cpuset, main_fn, main_arg, main_type);
         s = &schedulers_.back();
     }
     assert(s != NULL);
 
-	rte_eal_remote_launch(scheduler_rte_thread, s, lcore);
-	s->pthread_barrier_wait();
+    rte_eal_remote_launch(scheduler_rte_thread, s, lcore);
+    s->pthread_barrier_wait();
 }
 
 unsigned
 lcore_from_cpuset(cpu_set_t cpuset) {
-	int cnt = CPU_COUNT(&cpuset);
-	if (cnt != 1) {
-		fprintf(stderr, "Unexpected cpuset\n");
-		abort();
-	}
-	for (unsigned i=0; ; i++) {
-		if (CPU_ISSET(i, &cpuset))
-			return i;
-	}
+    int cnt = CPU_COUNT(&cpuset);
+    if (cnt != 1) {
+        fprintf(stderr, "Unexpected cpuset\n");
+        abort();
+    }
+    for (unsigned i=0; ; i++) {
+        if (CPU_ISSET(i, &cpuset))
+            return i;
+    }
 }
 
 void
 RteController::wait_for_all(void) {
     for (auto &s: schedulers_) {
         if (s.get_state() == Scheduler::State::RUNNING) {
-			unsigned lcore = lcore_from_cpuset(s.get_cpuset());
-            //printf("Waiting for scheduler on core: %u (%s)\n", lcore, &s);
-			int err = rte_eal_wait_lcore(lcore);
-			if (err) {
-				fprintf(stderr, "rte_eal_wait_lcore: returned: %d\n", err);
-			}
+            unsigned lcore = lcore_from_cpuset(s.get_cpuset());
+            int err = rte_eal_wait_lcore(lcore);
+            if (err) {
+                fprintf(stderr, "rte_eal_wait_lcore: returned: %d\n", err);
+            }
         }
     }
     ctl_done_ = true;
@@ -295,6 +276,5 @@ RteController::~RteController() {
         wait_for_all();
     }
 }
-
 
 } // end namespace trt

@@ -12,6 +12,7 @@
 #ifndef	_UDEPOT_SCHED_H_
 #define	_UDEPOT_SCHED_H_
 
+#include <coroutine>
 #include <pthread.h>
 #include "trt/uapi/trt.hh"
 
@@ -19,12 +20,14 @@ namespace udepot {
 
 class PthreadSched {
 public:
-	static inline void yield(void) { pthread_yield(); }
+	// Returns std::suspend_never so co_await PthreadSched::yield() compiles
+	// without actually suspending the coroutine (pthread_yield is synchronous).
+	static inline std::suspend_never yield(void) { sched_yield(); return {}; }
 };
 
 class TrtSched {
 public:
-	static inline void yield(void) { trt::T::yield(); }
+	static inline auto yield(void) { return trt::T::yield(); }
 };
 
 }

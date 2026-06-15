@@ -21,13 +21,13 @@ namespace udepot {
 // (e.g., for GET operations)
 //
 // Assumption: each client can only have one request in-flight at a time.
-static int
+static trt::CoroTask
 recv_request(ConnectionBase &cli, ReqHdr &req_hdr, Mbuff &mb_body, MbuffAllocIface &alloc_if)
 {
 	// Construct a msghdr and iovec to perform a single read
 	size_t iov_cnt, iov_bytes;
 	size_t iov_len = std::min(1 + mb_body.append_avail_nchunks(), (size_t)8);
-	struct iovec iov[iov_len];
+	struct iovec iov[8]; // fixed-size: iov_len is capped at 8 above
 	size_t prev_valid_size = mb_body.get_valid_size();
 
 	// body
@@ -49,15 +49,15 @@ recv_request(ConnectionBase &cli, ReqHdr &req_hdr, Mbuff &mb_body, MbuffAllocIfa
 	    .msg_flags = 0,        /* flags on received message */
 	};
 
-	ssize_t recv_bytes = cli.recvmsg(&msghdr, 0);
+	ssize_t recv_bytes = (ssize_t)(co_await cli.recvmsg(&msghdr, 0));
 	if (recv_bytes == -1) {
-		return errno;
+		co_return (trt::RetT)(int)errno;
 	} else if (recv_bytes == 0) {
-		return ECONNRESET;
+		co_return (trt::RetT)(int)ECONNRESET;
 	} else if (recv_bytes < static_cast<ssize_t>(sizeof(ReqHdr))) {
 		// Technically, this might have been a partial read, but this is very
 		// unlikely given the size of the header, so just bail out.
-		return ECONNRESET;
+		co_return (trt::RetT)(int)ECONNRESET;
 	}
 
 	mb_body.reslice(prev_valid_size + recv_bytes - sizeof(ReqHdr));
@@ -68,7 +68,7 @@ recv_request(ConnectionBase &cli, ReqHdr &req_hdr, Mbuff &mb_body, MbuffAllocIfa
 		ResHdr res_hdr(EBADMSG, 0);
 		int err;
 		std::tie(err, std::ignore) = cli.send_full(&res_hdr, sizeof(res_hdr), 0);
-		return EBADMSG;
+		co_return (trt::RetT)(int)EBADMSG;
 	}
 
 	// OK, now we can assume that we have a valid header
@@ -80,18 +80,18 @@ recv_request(ConnectionBase &cli, ReqHdr &req_hdr, Mbuff &mb_body, MbuffAllocIfa
 	// request in flight.
 	if (received_body_bytes > body_len) {
 		UDEPOT_MSG("Received more body bytes (%zd) than body length (%zd)", received_body_bytes, body_len);
-		return EBADMSG;
+		co_return (trt::RetT)(int)EBADMSG;
 	}
 	// Do we need to receive more?
 	if (received_body_bytes < body_len) {
 		alloc_if.mbuff_add_buffers(mb_body, prev_valid_size + body_len);
 		int err = cli.recv_append_to_mbuff(mb_body, body_len - received_body_bytes, 0);
 		if (err)
-			return err;
+			co_return (trt::RetT)(int)err;
 	}
 
 	assert(mb_body.get_valid_size() == prev_valid_size + body_len);
-	return 0;
+	co_return 0;
 }
 
 static int
@@ -147,7 +147,7 @@ send_get_responose(ConnectionBase &cli, ResGetHdr &reshdr, Mbuff &val) {
 //
 // If the client closed the connection (e.g., recv() returned 0)
 // ECONNRESET is returned so that the caller can close the socket, etc.
-int
+trt::CoroTask
 serve_kv_request(ConnectionBase &cli,
                  KV_MbuffInterface &kv, Mbuff &req_body, Mbuff &result) {
 
@@ -155,33 +155,14 @@ serve_kv_request(ConnectionBase &cli,
 	int err;
 
 	req_body.reslice(0);
-	// for the PUT operation, we can avoid copies if we allow for some space for
-	// a prefix. This enables PUT to do a prepend() without copying data.
-	//
-	// We can do that in the general case for the following reasons:
-	//
-	// 1. We know that our networks backends do not have alignment restrictions,
-	// which means that we can have the network write anywhere we want. If this
-	// assumption breaks, however (e.g,. implementing a DPDK backend), we will
-	// need to revisit our approach here. One solution would be to align the
-	// network headers with the prefix size, but this makes processing a bit
-	// more complicated. Another solution might be to have the body recv() only
-	// a small amount of data so that there is a fast path for the GET
-	// operations with small keys, and for every other case we copy this small
-	// amount of data and do a second recv().
-	//
-	// 2. GET and DEL operations do not perform IO reads/writes with the
-	// provided mbuffs, so no alignment restrictions exist there for the mbuffs
-	// we pass, so having having some prepending space for PUTs is fine.
 	size_t prefix_size = kv.putKeyvalPrefixSize();
-	kv.mbuff_add_buffers(req_body, prefix_size); // at least add space for the prefix
+	kv.mbuff_add_buffers(req_body, prefix_size);
 	req_body.append_uninitialized(prefix_size);
 
-	err = recv_request(cli, req_hdr, req_body, kv);
+	err = (int)(co_await recv_request(cli, req_hdr, req_body, kv));
 	if (err)
-		return err;
+		co_return (trt::RetT)(int)err;
 
-	// clear prefix space (allows for prepend())
 	size_t body_size = req_hdr.body_len();
 	assert(req_body.get_valid_size() == prefix_size + body_size);
 	req_body.reslice(body_size, prefix_size);
@@ -190,41 +171,38 @@ serve_kv_request(ConnectionBase &cli,
 		case ReqHdr::NOP: {
 			ResHdr res_hdr(0, req_hdr.req_id);
 			std::tie(err, std::ignore) = cli.send_full(&res_hdr, sizeof(res_hdr), 0);
-			return err ? errno : 0;
+			co_return (trt::RetT)(int)(err ? errno : 0);
 		}
 
 		case ReqHdr::PUT: {
 			auto &kv_mbuff = req_body;
-			//kv_mbuff.print_data(stdout, 0, req_hdr.put.key_len);
-			int ret = kv.put(kv_mbuff, req_hdr.put.key_len);
+			int ret = (int)(co_await kv.put(kv_mbuff, req_hdr.put.key_len));
 			UDEPOT_DBG("PUT returned: %d", ret);
-			// send reply
 			ResHdr res_hdr(ret, req_hdr.req_id);
 			std::tie(err, std::ignore) = cli.send_full(&res_hdr, sizeof(res_hdr), 0);
-			return err ? errno : 0;
+			co_return (trt::RetT)(int)(err ? errno : 0);
 		}
 
 		case ReqHdr::GET: {
 			auto &key_mbuff = req_body;
 			auto &val_mbuff = result;
 
-			//key_mbuff.print_data(stdout, 0, key_mbuff.get_valid_size());
 			val_mbuff.reslice(0);
-			int op_err = kv.get(key_mbuff, val_mbuff);
+			int op_err = (int)(co_await kv.get(key_mbuff, val_mbuff));
 			UDEPOT_DBG("GET returned: %d", op_err);
 
 			ResGetHdr reshdr(op_err, req_hdr.req_id, op_err ? 0 : val_mbuff.get_valid_size());
-			return send_get_responose(cli, reshdr, val_mbuff);
+			co_return (trt::RetT)(int)send_get_responose(cli, reshdr, val_mbuff);
 		}
 
 		case ReqHdr::DEL: {
 			UDEPOT_ERR("%s:%d: NYI!", __PRETTY_FUNCTION__, __LINE__);
-			return ENOTSUP;
+			co_return (trt::RetT)(int)ENOTSUP;
 		}
 
 		default:
 			UDEPOT_ERR("%s:%d: Uknown operation: %d", __PRETTY_FUNCTION__, __LINE__, req_hdr.op);
-			return EINVAL;
+			co_return (trt::RetT)(int)EINVAL;
 	}
 }
 
@@ -291,7 +269,7 @@ serve_kv_request_two_recvs(ConnectionBase &cli,
 			// clear space for prefix, so that put() can do prepend()
 			mb1.reslice(body_size, prefix_size);
 			// execute PUT
-			ret = kv.put(mb1, req_hdr.put.key_len);
+			ret = (ssize_t)kv.put(mb1, req_hdr.put.key_len).run_sync();
 			UDEPOT_DBG("PUT returned: %zd", ret);
 			// send reply
 			ResHdr res_hdr(ret, req_hdr.req_id);
@@ -316,7 +294,7 @@ serve_kv_request_two_recvs(ConnectionBase &cli,
 			assert(key_mbuff.get_valid_size() == req_hdr.get.key_len);
 
 			val_mbuff.reslice(0);
-			ret = kv.get(key_mbuff, val_mbuff);
+			ret = (ssize_t)kv.get(key_mbuff, val_mbuff).run_sync();
 			UDEPOT_DBG("GET returned: %zd", ret);
 			ResGetHdr reshdr(ret, req_hdr.req_id, err ? 0 : val_mbuff.get_valid_size());
 			std::tie(err, std::ignore) = cli.send_full(&reshdr, sizeof(reshdr), 0);

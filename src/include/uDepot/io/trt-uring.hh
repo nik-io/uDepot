@@ -40,14 +40,14 @@ public:
 	ssize_t pwritev(const struct iovec *iov, int iovcnt, off_t offset) override;
 
 	using Ptr = IoBuffMemalign<4096>::Ptr;
-	ssize_t pread_native(Ptr buff, size_t len, off_t off) override;
+	trt::CoroTask pread_native(Ptr buff, size_t len, off_t off) override;
 
-	ssize_t pwrite_native(Ptr buff, size_t len, off_t off) override;
+	trt::CoroTask pwrite_native(Ptr buff, size_t len, off_t off) override;
 
-	// error is returned as negative number
-	ssize_t preadv_native(IoVec<Ptr>  iov, off_t off) override;
+	// error is returned as negative number via co_return
+	trt::CoroTask preadv_native(IoVec<Ptr>  iov, off_t off) override;
 
-	ssize_t pwritev_native(IoVec<Ptr> iov, off_t off) override;
+	trt::CoroTask pwritev_native(IoVec<Ptr> iov, off_t off) override;
 private:
 	void trt_init_if_needed() override;
 	int get_tls_fd(void) override;

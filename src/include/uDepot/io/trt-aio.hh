@@ -17,6 +17,7 @@
  */
 
 #include <map>
+#include "trt/uapi/trt.hh"
 
 namespace udepot {
 
@@ -53,18 +54,16 @@ public:
 	}
 	#endif
 
-	// Native versions are the same with the normal ones
-	// NB: It would actually made more sense if pread() and pwrite() were
-	// implemented by calling pread_native() and pwritev_native().
+	// Coroutine-based native IO — co_await these from TRT task coroutines.
 	using Ptr = IoBuffMemalign<4096>::Ptr;
-	virtual ssize_t pread_native(Ptr buff, size_t len, off_t off);
+	virtual trt::CoroTask pread_native(Ptr buff, size_t len, off_t off);
 
-	virtual ssize_t pwrite_native(Ptr buff, size_t len, off_t off);
+	virtual trt::CoroTask pwrite_native(Ptr buff, size_t len, off_t off);
 
-	// error is returned as negative number
-	virtual ssize_t preadv_native(IoVec<Ptr>  iov, off_t off);
+	// error is returned as negative number via co_return
+	virtual trt::CoroTask preadv_native(IoVec<Ptr>  iov, off_t off);
 
-	virtual ssize_t pwritev_native(IoVec<Ptr> iov, off_t off);
+	virtual trt::CoroTask pwritev_native(IoVec<Ptr> iov, off_t off);
 
 	void *mmap(void *addr, size_t len, int prot, int flags, off_t off) override;
 	int msync(void *addr, size_t len, int flags) override;

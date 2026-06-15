@@ -41,7 +41,7 @@ class parser {
 public:
 	static constexpr u32 max_key_length = 250;
 	static constexpr u32 read_cmd_chunk = 1048576U;
-	static cmd read_cmd(udepot::ConnectionBase &con, msg_buff &buff);
+	static trt::CoroTask read_cmd(udepot::ConnectionBase &con, msg_buff &buff, cmd &cmd_out);
 	static int start(void);
 	static void stop(void);
 	static constexpr u32 REALTIME_MAXDELTA = 60*60*24*30;
@@ -130,19 +130,19 @@ struct cmd {
 	cmd(msg_buff &buff);
 	cmd() = delete;
 	~cmd() { }
-	void handle(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::MbuffCacheBase &mb_cache, udepot::Mbuff &mbuff, udepot::Mbuff &keymbuff);
-	void handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::Mbuff &mbuff);
-	void handle_arithmetic_cmd(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::Mbuff &mbuff);
-	void handle_stats_cmd(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::Mbuff &mbuff);
-	void handle_get(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::MbuffCacheBase &mb_cache, udepot::Mbuff &mbuff, udepot::Mbuff &keymbuff);
-	void handle_multiget(
+	trt::CoroTask handle(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::MbuffCacheBase &mb_cache, udepot::Mbuff &mbuff, udepot::Mbuff &keymbuff);
+	trt::CoroTask handle_store(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::Mbuff &mbuff);
+	trt::CoroTask handle_arithmetic_cmd(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::Mbuff &mbuff);
+	trt::CoroTask handle_stats_cmd(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::Mbuff &mbuff);
+	trt::CoroTask handle_get(udepot::ConnectionBase &con, KV_MbuffInterface &kv, udepot::MbuffCacheBase &mb_cache, udepot::Mbuff &mbuff, udepot::Mbuff &keymbuff);
+	trt::CoroTask handle_multiget(
 		udepot::ConnectionBase &con,
 		KV_MbuffInterface &kv,
 		udepot::MbuffCacheBase &mb_cache,
 		udepot::Mbuff &val_mbuff_in,
 		udepot::Mbuff &key_mbuff_in);
-	void handle_rsp(udepot::ConnectionBase &con);
-	int handle_single_kv_get(
+	trt::CoroTask handle_rsp(udepot::ConnectionBase &con);
+	trt::CoroTask handle_single_kv_get(
 		KV_MbuffInterface &kv,
 		const token *key,
 		udepot::Mbuff &keymb,
@@ -154,7 +154,7 @@ struct cmd {
 		const token *key,
 		udepot::Mbuff &key_mbuff,
 		udepot::Mbuff &val_mbuff);
-	int kv_get_for_mc(
+	trt::CoroTask kv_get_for_mc(
 		KV_MbuffInterface &kv,
 		udepot::Mbuff &key_mbuff,
 		udepot::Mbuff &val_mbuff);

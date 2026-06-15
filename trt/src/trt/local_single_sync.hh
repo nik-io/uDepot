@@ -87,6 +87,13 @@ class LocalSingleAsyncObj {
         assert(lsao_state_ == State::READY);
         return lsao_ret_;
     }
+
+    // Returns the waiting task (if any) and clears the pointer.
+    TaskBase *take_waiter() noexcept {
+        TaskBase *t = lsao_task_;
+        lsao_task_ = nullptr;
+        return t;
+    }
 };
 
 } // end namespace trt
