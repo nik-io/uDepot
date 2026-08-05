@@ -85,6 +85,8 @@ public:
 	trt::CoroTask put(Mbuff &keyval, size_t key_len, PutOp op = NORMAL) override final;
 	trt::CoroTask get(Mbuff const& key, Mbuff &val_out)  override final;
 	trt::CoroTask del(Mbuff const& key)  override final;
+	trt::CoroTask exists(Mbuff const& key, size_t &val_size) override final;
+	trt::CoroTask exists(const char key[], size_t key_size, size_t &val_size) override final;
 
 	void thread_local_entry() override final;
 	void thread_local_exit() override final;
@@ -158,6 +160,7 @@ private:
 	// class members for member functions we need to pass to local_op_execute()
 	// (the goal is to avoid heap allocations on each operation)
 	std::function<trt::CoroTask(uDepotSalsa<RT> *, u64, Mbuff const&, Mbuff &)> local_get_mbuff_m;
+	std::function<trt::CoroTask(uDepotSalsa<RT> *, u64, Mbuff const&, size_t &)> local_exists_mbuff_m;
 	std::function<trt::CoroTask(uDepotSalsa<RT> *, u64, Mbuff &, size_t, u64, PutOp, u64 *)> local_put_mbuff_m;
 	std::function<trt::CoroTask(uDepotSalsa<RT> *, u64, Mbuff const&)> local_del_mbuff_m;
 
@@ -184,6 +187,10 @@ private:
 		u64 h, Mbuff const& mb, size_t mb_key_off,
 		size_t mb_key_len, Mbuff &mb_dst, HashEntry *trgt_out,
 		int *err_out, size_t *val_size_out);
+	// lookup_exists: metadata-only lookup, reads only header+key, not value
+	trt::CoroTask lookup_exists(
+		u64 h, Mbuff const& mb_key, size_t mb_key_off,
+		size_t mb_key_len, int *err_out, size_t *val_size_out);
 	// lookup_mbuff_put: co_returns 0; results via out params
 	trt::CoroTask lookup_mbuff_put(
 		u64 h, Mbuff const& mb_key, size_t mb_key_off,
@@ -195,6 +202,7 @@ private:
 	// following functions co_return the int error code
 	trt::CoroTask local_put_mbuff(u64 h, Mbuff &keyval, size_t key_len, u64 grain, PutOp op, u64 *old_pba);
 	trt::CoroTask local_get_mbuff(u64 key_hash, Mbuff const& key, Mbuff &val_out);
+	trt::CoroTask local_exists_mbuff(u64 key_hash, Mbuff const& key, size_t &val_size);
 	trt::CoroTask local_del_mbuff(u64 h, Mbuff const& key);
 
 	// wrapper for executing local operations (all ops return trt::CoroTask)
