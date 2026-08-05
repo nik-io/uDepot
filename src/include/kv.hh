@@ -89,6 +89,25 @@ public:
 	 */
 	virtual trt::CoroTask del(const char key[], size_t key_size) = 0;
 
+	/**
+	 * Check if a key exists and return its value size without
+	 * reading the value data.  Implementations may optimize this
+	 * to read only on-disk metadata, avoiding the full value I/O.
+	 * @key:      byte array that represents the key
+	 * @key_size: size of @key byte array
+	 * @val_size: [out] size of the value stored in the KV
+	 * Returns:
+	 * 0:       key exists, @val_size is valid
+	 * ENODATA: key does not exist
+	 * EIO:     I/O error
+	 */
+	virtual trt::CoroTask exists(const char key[], size_t key_size, size_t &val_size) {
+		size_t val_size_read = 0;
+		char probe;
+		trt::RetT ret = co_await get(key, key_size, &probe, 1, val_size_read, val_size);
+		co_return ret;
+	}
+
 	virtual unsigned long get_size() const = 0;
 
 	virtual unsigned long get_raw_capacity() const = 0;
