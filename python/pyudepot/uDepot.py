@@ -25,14 +25,17 @@ pyopen = libudepot.uDepotOpen
 pyclose = libudepot.uDepotClose
 pyget = libudepot.uDepotGet
 pyput = libudepot.uDepotPut
+pydel = libudepot.uDepotDel
+pyexists = libudepot.uDepotExists
 
 
 pyopen.argtypes  = [c_char_p, c_ulonglong, c_int]
 pyclose.argtypes = [c_void_p]
 pyget.argtypes   = [c_void_p, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_uint, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_ulonglong]
 pyput.argtypes   = [c_void_p, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_uint, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_ulonglong]
-
-# TODO: del, 0copy
+pydel.argtypes   = [c_void_p, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_uint]
+pyexists.argtypes = [c_void_p, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_uint, POINTER(c_ulonglong)]
+pyexists.restype  = c_int
 class uDepot:
     def __init__(self, **kwargs):
         self._fname = kwargs.get('file_name', '/tmp/pyudepot-test')
@@ -65,4 +68,22 @@ class uDepot:
             logging.info('pyput returned={}'.format(rc))
             return False
         return True
+
+    # key: np with key
+    # returns True if deleted, False if not found
+    def delete(self, key):
+        rc = pydel(self._kv, key, key.size)
+        if 0 != rc:
+            logging.info('pydel returned={}'.format(rc))
+            return False
+        return True
+
+    # key: np with key
+    # returns value size in bytes, or None if not found
+    def exists(self, key):
+        val_size = c_ulonglong(0)
+        rc = pyexists(self._kv, key, key.size, byref(val_size))
+        if 0 != rc:
+            return None
+        return val_size.value
 
