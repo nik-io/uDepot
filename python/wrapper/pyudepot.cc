@@ -52,7 +52,8 @@ void uDepotClose(void *const kv_p) {
 int uDepotGet(void *const kv_p, const uint8_t key[], uint32_t key_size, uint8_t val_buf[], uint64_t val_buf_size) {
 	KV *const kv = static_cast<KV *>(kv_p);
 	size_t val_size_read, val_size;
-	int rc = kv->get((const char *) key, key_size, (char *) val_buf, val_buf_size, val_size_read, val_size);
+	int rc = static_cast<int>(
+		kv->get((const char *) key, key_size, (char *) val_buf, val_buf_size, val_size_read, val_size).run_sync());
 	if (0 != rc && ENODATA != rc) {
 		fprintf(stderr, "GET failed with %s\n", strerror(rc));
 	} else if (0 == rc)
@@ -62,10 +63,31 @@ int uDepotGet(void *const kv_p, const uint8_t key[], uint32_t key_size, uint8_t 
 
 int uDepotPut(void *const kv_p, const uint8_t key[], uint32_t key_size, const uint8_t val[], uint64_t val_size) {
 	KV *const kv = static_cast<KV *>(kv_p);
-	int rc = kv->put((const char *) key, key_size, (char *) val, val_size);
+	int rc = static_cast<int>(
+		kv->put((const char *) key, key_size, (char *) val, val_size).run_sync());
 	if (0 != rc) {
-		fprintf(stderr, "GET failed with %s\n", strerror(rc));
+		fprintf(stderr, "PUT failed with %s\n", strerror(rc));
 	}
+	return rc;
+}
+
+int uDepotDel(void *const kv_p, const uint8_t key[], uint32_t key_size) {
+	KV *const kv = static_cast<KV *>(kv_p);
+	int rc = static_cast<int>(
+		kv->del((const char *) key, key_size).run_sync());
+	if (0 != rc && ENODATA != rc) {
+		fprintf(stderr, "DEL failed with %s\n", strerror(rc));
+	}
+	return rc;
+}
+
+int uDepotExists(void *const kv_p, const uint8_t key[], uint32_t key_size, uint64_t *val_size_out) {
+	KV *const kv = static_cast<KV *>(kv_p);
+	size_t val_size = 0;
+	int rc = static_cast<int>(
+		kv->exists((const char *) key, key_size, val_size).run_sync());
+	if (0 == rc && val_size_out)
+		*val_size_out = val_size;
 	return rc;
 }
 
