@@ -19,9 +19,13 @@ perf.data
 perf.data.old
 cscope.out
 test/uDepot/udepot-utests
+test/uDepot/Mbuff-test
+test/uDepot/io-helpers
 test/jni/uDepotJNITest.class
 test/uDepot/memcache/udepot-memcache-server
 test/uDepot/memcache/udepot-memcache-test
 test/uDeopt/udepot-test
 test/uDeopt/udepot-trt-test
 test/uDepot/udepot-net-ubench
+salsa/src/frontends/usalsa++/build/
+python/pyudepot/libpyudepot.so

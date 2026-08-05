@@ -66,6 +66,7 @@ uDepotSalsa<RT>::uDepotSalsa(const u32 thread_nr,
 	  map_m(md_m, udepot_io_m),
 	  salsa_streams_nr_m(thread_nr),
 	  local_get_mbuff_m(std::mem_fn(&uDepotSalsa::local_get_mbuff)),
+	  local_exists_mbuff_m(std::mem_fn(&uDepotSalsa::local_exists_mbuff)),
 	  local_put_mbuff_m(std::mem_fn(&uDepotSalsa::local_put_mbuff)),
 	  local_del_mbuff_m(std::mem_fn(&uDepotSalsa::local_del_mbuff)),
 	  net_m(thread_nr_m, self_clients, self_server, *this),
@@ -1596,6 +1597,152 @@ uDepotSalsa<RT>::get(Mbuff const& key, Mbuff &val_out)
 	trt::RetT ret = co_await local_op_execute(h, local_get_mbuff_m, h, key, val_out);
 	PROBE_TICKS_END(local_get_mbuff);
 	co_return ret;
+}
+
+// Metadata-only lookup: reads only the on-disk header + key to verify a
+// match, avoiding the potentially large value I/O.  Used by exists().
+template<typename RT>
+trt::CoroTask
+uDepotSalsa<RT>::lookup_exists(
+	const u64 key_hash, Mbuff const& mb_key, const size_t mb_key_off,
+	const size_t mb_key_len, int *err_out, size_t *val_size_out)
+{
+	int err;
+	uDepotMap<RT> *const udm = this->map_m.hash_to_map(key_hash);
+	HashEntry *trgt = nullptr;
+	HashEntry trgtcpy(0, 0);
+	std::array<u64, _UDEPOT_HOP_SCOTCH_BUCKET_SIZE> pbas_visited;
+	u32 lookup_nr = 0;
+	const u64 alignment = std::min(512UL, grain_size_m);
+	const u64 md_io_size = align_up(putKeyvalPrefixSize() + mb_key_len, alignment);
+
+	do {
+		std::tie(err, trgt) = lookup_common(key_hash, lookup_nr, pbas_visited);
+		if (0 != err) {
+			*err_out = err; *val_size_out = 0;
+			co_return 0;
+		}
+		if (nullptr == trgt)
+			break;
+
+		trgtcpy = *trgt;
+		udm->unlock(key_hash);
+
+		const u64 offset = trgtcpy.pba * grain_size_m;
+
+		Mbuff md_mb(mbuff_type_index());
+		mbuff_add_buffers(md_mb, md_io_size);
+		if (md_mb.get_free_size() < md_io_size) {
+			co_await udm->lock(key_hash);
+			*err_out = ENOMEM; *val_size_out = 0;
+			co_return 0;
+		}
+
+		size_t bytes = 0;
+		co_await io_pread_mbuff_append_full(udepot_io_m, md_mb, md_io_size, offset, &err, &bytes);
+		if (err) {
+			mbuff_free_buffers(md_mb);
+			co_await udm->lock(key_hash);
+			*err_out = EIO; *val_size_out = 0;
+			co_return 0;
+		}
+
+		uDepotSalsaStoreHeader md;
+		md_mb.copy_to_buffer(0, (void *) &md, sizeof(md));
+
+		bool match = md.key_size == mb_key_len;
+		if (match)
+			match = 0 == Mbuff::mem_compare(mb_key, mb_key_off,
+			                                 md_mb, putKeyvalPrefixSize(),
+			                                 mb_key_len);
+		mbuff_free_buffers(md_mb);
+
+		if (match) {
+			co_await udm->lock(key_hash);
+			*err_out = EEXIST;
+			*val_size_out = (u32)md.val_size;
+			co_return 0;
+		}
+		update_visited_pba(trgtcpy.pba, lookup_nr, pbas_visited);
+
+		co_await udm->lock(key_hash);
+	} while (1);
+
+	*err_out = ENODATA;
+	*val_size_out = 0;
+	co_return 0;
+}
+
+template<typename RT>
+trt::CoroTask
+uDepotSalsa<RT>::local_exists_mbuff(const u64 key_hash, Mbuff const& key, size_t &val_size)
+{
+	int err;
+	const size_t key_size = key.get_valid_size();
+	co_await lookup_exists(key_hash, key, 0, key_size, &err, &val_size);
+	if (err == EEXIST)
+		err = 0;
+	co_return (trt::RetT)(int)err;
+}
+
+template<typename RT>
+__attribute__((warn_unused_result))
+trt::CoroTask
+uDepotSalsa<RT>::exists(Mbuff const& key, size_t &val_size)
+{
+	u64 h;
+	int err = HashFn::hash(h, key);
+	if (err)
+		co_return (trt::RetT)(int)err;
+
+	typename RT::Net::Client *cli = get_client(h);
+	if (cli) {
+		// Remote path: fall back to full get for now
+		Mbuff val_mb(mbuff_type_index());
+		int xret = cli->remote_get(key, val_mb);
+		if (xret == 0)
+			val_size = val_mb.get_valid_size();
+		mbuff_free_buffers(val_mb);
+		co_return (trt::RetT)(int)xret;
+	}
+
+	trt::RetT ret = co_await local_op_execute(h, local_exists_mbuff_m, h, key, val_size);
+	co_return ret;
+}
+
+template<typename RT>
+__attribute__((warn_unused_result))
+trt::CoroTask
+uDepotSalsa<RT>::exists(const char key[], const size_t key_size, size_t &val_size)
+{
+	int err;
+	size_t key_copied;
+
+	Mbuff *key_mb = mb_cache_m.mb_get();
+	if (key_mb == nullptr) {
+		co_return (trt::RetT)(int)ENOMEM;
+	}
+
+	if (key_mb->get_free_size() < key_size) {
+		mbuff_add_buffers(*key_mb, key_size);
+		if (key_mb->get_free_size() < key_size) {
+			err = ENOMEM;
+			goto end;
+		}
+	}
+
+	key_copied = key_mb->append_from_buffer(key, key_size);
+	if (key_copied != key_size) {
+		err = ENOMEM;
+		goto end;
+	}
+
+	err = (int)(co_await exists(*key_mb, val_size));
+
+end:
+	if (key_mb)
+		mb_cache_m.mb_put(key_mb);
+	co_return (trt::RetT)(int)err;
 }
 
 // Perform an DEL operation

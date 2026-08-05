@@ -36,6 +36,10 @@ public:
 	virtual trt::CoroTask put(Mbuff &keyval, size_t key_len, PutOp op = NORMAL)  = 0;
 	virtual trt::CoroTask del(Mbuff const& key)  = 0;
 
+	// Check if a key exists and return its value size.
+	// Implementations should read only on-disk metadata, not the full value.
+	virtual trt::CoroTask exists(Mbuff const& key, size_t &val_size) = 0;
+
 	virtual size_t get_kvmbuff_size() = 0;
 	// Optimization to avoid copy for PUTs when using IO operations that have
 	// buffer restrictions (e.g., direct IO, SPDK).
@@ -131,6 +135,15 @@ public:
 		UDEPOT_ERR("%s:%d: NYI!", __PRETTY_FUNCTION__, __LINE__);
 		abort();
 		co_return 0;
+	}
+
+	virtual trt::CoroTask exists(Mbuff const& key, size_t &val_size) override {
+		Mbuff val_mb(mbuff_type_index());
+		int err = (int)(co_await get(key, val_mb));
+		if (err == 0)
+			val_size = val_mb.get_valid_size();
+		mbuff_free_buffers(val_mb);
+		co_return (trt::RetT)(int)err;
 	}
 
 	std::type_index mbuff_type_index(void) override final {
