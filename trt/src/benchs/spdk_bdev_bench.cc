@@ -29,7 +29,7 @@ extern "C" {
 static const uint64_t NUM_BLOCKS   = 32768;  // 128 MiB
 static const uint32_t BLOCK_SIZE   = 4096;
 static const uint64_t NOPS         = 1000000;
-static const uint64_t WARMUP_OPS   = 50000;
+static const uint64_t WARMUP_OPS   = 100000;
 static const uint32_t QUEUE_DEPTH  = 64;
 
 struct IoSlot;
