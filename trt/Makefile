@@ -202,10 +202,10 @@ SPDK_LIBS  = external/spdk/build/lib/libspdk_nvme.a     \
              external/spdk/build/lib/libspdk_log.a      \
              external/spdk/build/lib/libspdk_env_dpdk.a \
              external/spdk/build/lib/libspdk_sock.a     \
-             external/spdk/build/lib/libspdk_json.a     \
-             external/spdk/build/lib/libspdk_jsonrpc.a  \
-             external/spdk/build/lib/libspdk_rpc.a      \
              external/spdk/build/lib/libspdk_keyring.a  \
+             external/spdk/build/lib/libspdk_rpc.a      \
+             external/spdk/build/lib/libspdk_jsonrpc.a  \
+             external/spdk/build/lib/libspdk_json.a     \
              external/spdk/build/lib/libspdk_dma.a      \
              -Lexternal/spdk/dpdk/build/lib \
              -Wl,-rpath=external/spdk/dpdk/build/lib \
@@ -279,7 +279,7 @@ builddirs:
 
 build_spdk:
 	cd external/spdk && git submodule update --init dpdk
-	cd external/spdk && ./configure --with-shared --without-isal && make -j
+	cd external/spdk && ./configure --disable-unit-tests --disable-tests && make -j
 
 build_uring:
 	cd external/liburing && CFLAGS="-fpic -fPIC" CPPFLAGS="-fpic -fPIC" LINK_FLAGS="-fpic -fPIC" make
