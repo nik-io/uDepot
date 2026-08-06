@@ -72,8 +72,11 @@ CoroTask t_io(void *arg__) {
     size_t chunk = rand() % nchunks;
     int ret;
 
-    char buff__[arg->buff_size] __attribute__((aligned(4096)));
-    char *buff = buff__;
+    char *buff;
+    if (posix_memalign((void **)&buff, 4096, arg->buff_size) != 0) {
+        perror("posix_memalign");
+        co_return -1;
+    }
 
     ret = co_await AIO::pread(arg->fd, buff, arg->buff_size, chunk * arg->buff_size);
     if (ret < 0) {
@@ -89,6 +92,7 @@ CoroTask t_io(void *arg__) {
             if (buff[i] != c) { fprintf(stderr, "Error!"); exit(1); }
         }
     }
+    free(buff);
     co_return 0;
 }
 
