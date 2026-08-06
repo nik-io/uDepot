@@ -163,11 +163,38 @@ protected:
 
 static thread_local bool        SpdkThreadInitialized__ = false;
 
+static ssize_t sync_pread_fn(SpdkQpair *qp, void *buff, size_t len, off_t off) {
+	return qp->read_sync(buff, len, off);
+}
+static ssize_t sync_pwrite_fn(SpdkQpair *qp, void *buff, size_t len, off_t off) {
+	return qp->write_sync(buff, len, off);
+}
+static ssize_t sync_preadv_fn(SpdkQpair *qp, const struct iovec *iov, int iovcnt, off_t off) {
+	ssize_t tot = 0;
+	for (int i = 0; i < iovcnt; i++) {
+		ssize_t r = qp->read_sync(iov[i].iov_base, iov[i].iov_len, off + tot);
+		if (r == -1) return -1;
+		tot += r;
+		if (static_cast<size_t>(r) != iov[i].iov_len) break;
+	}
+	return tot;
+}
+static ssize_t sync_pwritev_fn(SpdkQpair *qp, const struct iovec *iov, int iovcnt, off_t off) {
+	ssize_t tot = 0;
+	for (int i = 0; i < iovcnt; i++) {
+		ssize_t r = qp->write_sync(iov[i].iov_base, iov[i].iov_len, off + tot);
+		if (r == -1) return -1;
+		tot += r;
+		if (static_cast<size_t>(r) != iov[i].iov_len) break;
+	}
+	return tot;
+}
+
 TrtSpdkArrayIO::TrtSpdkArrayIO():
-	pread_iofn_m(&trt::SPDK::pread),
-	pwrite_iofn_m(&trt::SPDK::pwrite),
-	preadv_iofn_m(&trt::SPDK::preadv),
-	pwritev_iofn_m(&trt::SPDK::pwritev),
+	pread_iofn_m(&sync_pread_fn),
+	pwrite_iofn_m(&sync_pwrite_fn),
+	preadv_iofn_m(&sync_preadv_fn),
+	pwritev_iofn_m(&sync_pwritev_fn),
 	pread_native_iofn_m(&TrtSpdkArrayIO::pread_native_fn),
 	pwrite_native_iofn_m(&TrtSpdkArrayIO::pwrite_native_fn),
 	preadv_native_iofn_m(&TrtSpdkArrayIO::preadv_native_fn),
@@ -308,9 +335,9 @@ TrtSpdkArrayIO::pread_native_fn(SpdkQpair *qp, void *buff_, size_t len, off_t of
     const u64 lba_end = udiv_round_up(off + len, b);
     const u64 nlbas = lba_end - lba_start;
     SpdkPtr buff = SpdkPtr(buff_, len);
-    const int rc = trt::SPDK::read(qp, buff, lba_start, nlbas);
-    if (static_cast<u64>(rc) != nlbas) {
-	    UDEPOT_ERR("spdk read ret=%d.", rc);
+    const ssize_t rc = qp->read_raw_sync(buff, lba_start, nlbas);
+    if (rc < 0 || static_cast<u64>(rc) != nlbas) {
+	    UDEPOT_ERR("spdk read ret=%ld.", rc);
 	    errno = EIO;
 	    return -1;
     }
@@ -325,9 +352,9 @@ TrtSpdkArrayIO::pwrite_native_fn(SpdkQpair *qp, void *buff_, size_t len, off_t o
     const u64 lba_end = udiv_round_up(off + len, b);
     const u64 nlbas = lba_end - lba_start;
     SpdkPtr buff = SpdkPtr(buff_, len);
-    const int rc = trt::SPDK::write(qp, buff, lba_start, nlbas);
-    if (static_cast<u64>(rc) != nlbas) {
-	    UDEPOT_ERR("spdk read ret=%d.", rc);
+    const ssize_t rc = qp->write_raw_sync(buff, lba_start, nlbas);
+    if (rc < 0 || static_cast<u64>(rc) != nlbas) {
+	    UDEPOT_ERR("spdk write ret=%ld.", rc);
 	    errno = EIO;
 	    return -1;
     }
@@ -360,30 +387,30 @@ TrtSpdkArrayIO::pwritev_native_fn(SpdkQpair *qp, const struct iovec *iov, int io
 	return tot;
 }
 
-ssize_t TrtSpdkArrayIO::pread_native(Ptr buff, size_t len, off_t off)
+trt::CoroTask TrtSpdkArrayIO::pread_native(Ptr buff, size_t len, off_t off)
 {
-	return pio(buff.ptr_m, len, off, pread_native_iofn_m);
+	co_return (trt::RetT)pio(buff.ptr_m, len, off, pread_native_iofn_m);
 }
 
-ssize_t TrtSpdkArrayIO::pwrite_native(Ptr buff, size_t len, off_t off)
+trt::CoroTask TrtSpdkArrayIO::pwrite_native(Ptr buff, size_t len, off_t off)
 {
-	return pio(buff.ptr_m, len, off, pwrite_native_iofn_m);
+	co_return (trt::RetT)pio(buff.ptr_m, len, off, pwrite_native_iofn_m);
 }
 
-ssize_t TrtSpdkArrayIO::preadv_native(IoVec<Ptr>  iov, off_t off)
+trt::CoroTask TrtSpdkArrayIO::preadv_native(IoVec<Ptr>  iov, off_t off)
 {
 	if (likely(1 == iov.iov_cnt_m))
-		return pio(iov.iov_m->iov_base, iov.iov_m->iov_len, off, pread_native_iofn_m);
+		co_return (trt::RetT)pio(iov.iov_m->iov_base, iov.iov_m->iov_len, off, pread_native_iofn_m);
 	else
-		return piov(iov.iov_m, iov.iov_cnt_m, off, preadv_native_iofn_m);
+		co_return (trt::RetT)piov(iov.iov_m, iov.iov_cnt_m, off, preadv_native_iofn_m);
 }
 
-ssize_t TrtSpdkArrayIO::pwritev_native(IoVec<Ptr> iov, off_t off)
+trt::CoroTask TrtSpdkArrayIO::pwritev_native(IoVec<Ptr> iov, off_t off)
 {
 	if (likely(1 == iov.iov_cnt_m))
-		return pio(iov.iov_m->iov_base, iov.iov_m->iov_len, off, pwrite_native_iofn_m);
+		co_return (trt::RetT)pio(iov.iov_m->iov_base, iov.iov_m->iov_len, off, pwrite_native_iofn_m);
 	else
-		return piov(iov.iov_m, iov.iov_cnt_m, off, pwritev_native_iofn_m);
+		co_return (trt::RetT)piov(iov.iov_m, iov.iov_cnt_m, off, pwritev_native_iofn_m);
 }
 
 

@@ -289,6 +289,91 @@ struct SpdkQpair {
         return r;
     }
 
+    struct SyncCtx { bool done; int status; };
+
+    static void sync_cb(void *ctx, const struct spdk_nvme_cpl *cpl) {
+        auto *sc = static_cast<SyncCtx *>(ctx);
+        sc->status = spdk_nvme_cpl_is_error(cpl) ? -1 : 0;
+        sc->done = true;
+    }
+
+    ssize_t read_sync(void *buff, size_t len, off_t off) {
+        size_t bsize = get_sector_size();
+        uint64_t lba_start = off / bsize;
+        uint64_t lba_end = (off + len + bsize - 1) / bsize;
+        uint64_t nlbas = lba_end - lba_start;
+
+        SpdkPtr dma_buf = alloc_buffer(nlbas);
+        if (!dma_buf.ptr_m) { errno = ENOMEM; return -1; }
+
+        SyncCtx ctx{false, 0};
+        int rc = spdk_nvme_ns_cmd_read(
+            sqp_namespace->sn_namespace, sqp_qpair,
+            dma_buf.ptr_m, lba_start, nlbas, sync_cb, &ctx, 0);
+        if (rc) { free_buffer(std::move(dma_buf)); return -1; }
+        sqp_npending++;
+        while (!ctx.done)
+            execute_completions(0);
+        npending_dec(1);
+        if (ctx.status != 0) { free_buffer(std::move(dma_buf)); return -1; }
+
+        size_t copy_off = off - lba_start * bsize;
+        memcpy(buff, (char *)dma_buf.ptr_m + copy_off, len);
+        free_buffer(std::move(dma_buf));
+        return (ssize_t)len;
+    }
+
+    ssize_t read_raw_sync(SpdkPtr &buff, uint64_t lba, uint32_t lba_cnt) {
+        SyncCtx ctx{false, 0};
+        int rc = spdk_nvme_ns_cmd_read(
+            sqp_namespace->sn_namespace, sqp_qpair,
+            buff.ptr_m, lba, lba_cnt, sync_cb, &ctx, 0);
+        if (rc) return -1;
+        sqp_npending++;
+        while (!ctx.done)
+            execute_completions(0);
+        npending_dec(1);
+        return ctx.status == 0 ? (ssize_t)lba_cnt : -1;
+    }
+
+    ssize_t write_sync(const void *buff, size_t len, off_t off) {
+        size_t bsize = get_sector_size();
+        uint64_t lba_start = off / bsize;
+        uint64_t lba_end = (off + len + bsize - 1) / bsize;
+        uint64_t nlbas = lba_end - lba_start;
+
+        SpdkPtr dma_buf = alloc_buffer(nlbas);
+        if (!dma_buf.ptr_m) { errno = ENOMEM; return -1; }
+
+        size_t copy_off = off - lba_start * bsize;
+        memcpy((char *)dma_buf.ptr_m + copy_off, buff, len);
+
+        SyncCtx ctx{false, 0};
+        int rc = spdk_nvme_ns_cmd_write(
+            sqp_namespace->sn_namespace, sqp_qpair,
+            dma_buf.ptr_m, lba_start, nlbas, sync_cb, &ctx, 0);
+        if (rc) { free_buffer(std::move(dma_buf)); return -1; }
+        sqp_npending++;
+        while (!ctx.done)
+            execute_completions(0);
+        npending_dec(1);
+        free_buffer(std::move(dma_buf));
+        return ctx.status == 0 ? (ssize_t)len : -1;
+    }
+
+    ssize_t write_raw_sync(SpdkPtr &buff, uint64_t lba, uint32_t lba_cnt) {
+        SyncCtx ctx{false, 0};
+        int rc = spdk_nvme_ns_cmd_write(
+            sqp_namespace->sn_namespace, sqp_qpair,
+            buff.ptr_m, lba, lba_cnt, sync_cb, &ctx, 0);
+        if (rc) return -1;
+        sqp_npending++;
+        while (!ctx.done)
+            execute_completions(0);
+        npending_dec(1);
+        return ctx.status == 0 ? (ssize_t)lba_cnt : -1;
+    }
+
     SpdkPtr alloc_buffer(size_t nlbas, int numa_node = SOCKET_ID_ANY, char *rte_type = NULL);
     void free_buffer(SpdkPtr &&p);
 };

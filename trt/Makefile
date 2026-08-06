@@ -156,9 +156,13 @@ SPDK_LIBS  = external/spdk/build/lib/libspdk_nvme.a     \
              external/spdk/build/lib/libspdk_json.a     \
              external/spdk/build/lib/libspdk_jsonrpc.a  \
              external/spdk/build/lib/libspdk_rpc.a      \
+             external/spdk/build/lib/libspdk_keyring.a  \
+             external/spdk/build/lib/libspdk_dma.a      \
              -Lexternal/spdk/dpdk/build/lib \
              -Wl,-rpath=external/spdk/dpdk/build/lib \
              -lrte_eal -lrte_mempool -lrte_ring -lrte_telemetry \
+             -lrte_pci -lrte_bus_pci \
+             -lssl -lcrypto \
              -ldl -lrt -lnuma -luuid
 
 spdk_SRC = $(trt_backends_DIR)/trt_spdk.cc  $(src_DIR)/trt_util/spdk.cc
@@ -178,7 +182,7 @@ trt_backends_DEP = $(call transform_SRC, $(trt_backends_SRC),%.d)
 
 all_TESTS = $(trt_TESTS)
 ifeq (1, $(BUILD_SPDK))
-      CFLAGS_          += -msse4
+      CFLAGS_          += -msse4 -Wno-volatile
       all_TESTS        += $(trt_spdk_TESTS)
 endif
 ifeq (1, $(BUILD_RDMA))
