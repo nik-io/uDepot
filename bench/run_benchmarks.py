@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run TRT AIO and io_uring benchmarks, collect statistics, and output JSON.
+"""Run TRT I/O benchmarks, collect statistics, and output JSON.
 
 Usage:
     python3 bench/run_benchmarks.py [--iterations N] [--output FILE]
     python3 bench/run_benchmarks.py --record-baseline [--output FILE]
+    python3 bench/run_benchmarks.py --spdk [--iterations N] [--output FILE]
 
 The script builds the TRT benchmarks (if needed), runs each one N times,
 and reports per-backend stats: median, mean, stddev, min, max, p5, p95
@@ -11,6 +12,8 @@ for Kops/sec and MiB/sec.
 
 With --record-baseline, writes the results as a baseline JSON file that
 the flywheel regression tests compare against.
+
+With --spdk, includes the SPDK bdev_malloc benchmark (requires BUILD_SPDK=1).
 """
 
 import argparse
@@ -33,6 +36,13 @@ BENCHMARKS = {
     "trt_uring": {
         "binary": "build/benchs/trt_uring_bench",
         "description": "TRT io_uring 4K random read",
+    },
+}
+
+SPDK_BENCHMARKS = {
+    "spdk_bdev_malloc": {
+        "binary": "build/benchs/spdk_bdev_bench",
+        "description": "SPDK bdev_malloc 4K random read",
     },
 }
 
@@ -113,12 +123,17 @@ def compute_stats(samples: list[float]) -> dict[str, float]:
     }
 
 
-def run_benchmarks(iterations: int) -> dict:
+def run_benchmarks(iterations: int, include_spdk: bool = False) -> dict:
     """Run all benchmarks and collect results."""
     build_trt()
+
+    benches = dict(BENCHMARKS)
+    if include_spdk:
+        benches.update(SPDK_BENCHMARKS)
+
     results = {}
 
-    for name, info in BENCHMARKS.items():
+    for name, info in benches.items():
         binary = TRT_DIR / info["binary"]
         if not binary.exists():
             print(f"SKIP {name}: binary not found", file=sys.stderr)
@@ -165,9 +180,13 @@ def main() -> None:
         "--record-baseline", action="store_true",
         help="Record results as baseline for regression testing",
     )
+    parser.add_argument(
+        "--spdk", action="store_true",
+        help="Include SPDK bdev_malloc benchmark (requires BUILD_SPDK=1 build)",
+    )
     args = parser.parse_args()
 
-    results = run_benchmarks(args.iterations)
+    results = run_benchmarks(args.iterations, include_spdk=args.spdk)
 
     output = {
         "benchmarks": results,
