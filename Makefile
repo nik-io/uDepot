@@ -167,7 +167,9 @@ ifeq (1, $(BUILD_SPDK))
 endif
 
 
-ALL = $(TESTS) $(MC_SERVER) $(MC_TEST) $(LIBUDEPOT)
+BENCHMARKS = bench/io_layer_bench
+
+ALL = $(TESTS) $(BENCHMARKS) $(MC_SERVER) $(MC_TEST) $(LIBUDEPOT)
 
 ifeq (1, $(BUILD_JNI))
 	ALL   += uDepotJNITest
@@ -269,6 +271,7 @@ udepot_all_SRC = $(udepot_SRC)                     \
                  $(udepot_memcache_test_SRC)       \
                  test/misc/inline_cache.cc         \
                  test/uDepot/io-helpers.cc         \
+                 bench/io_layer_bench.cc           \
                  src/uDepot/lsa/udepot-dir-map-or.cc \
                  test/uDepot/uDepotDirMapORTest.cc \
                  python/wrapper/pyudepot.cc \
@@ -300,6 +303,9 @@ test/uDepot/udepot-net-ubench: $(LIBTRT_OBJ) $(udepot_net_ubench_OBJ) $(udepot_O
 	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
 
 test/uDepot/io-helpers:  $(LIBTRT_OBJ) test/uDepot/io-helpers.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
+	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
+
+bench/io_layer_bench: $(LIBTRT_OBJ) bench/io_layer_bench.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
 	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
 
 test/uDepot/Mbuff-test: src/uDepot/mbuff.cc src/include/uDepot/mbuff.hh ./src/include/util/inline-cache.hh
@@ -451,6 +457,7 @@ lclean:
 	rm  -f scripts/docker/libcityhash.so.0
 	rm  -f src/uDepot/lsa/udepot-dir-map-or.o
 	rm  -f test/uDepot/io-helpers.o
+	rm  -f bench/io_layer_bench bench/io_layer_bench.o
 	rm  -f test/uDepot/uDepotDirMapORTest test/uDepot/uDepotDirMapORTest.o
 	rm  -f python/wrapper/pyudepot.o
 	make -C $(TRT_DIR) clean;

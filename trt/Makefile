@@ -145,6 +145,55 @@ trt_spdk_TESTS = \
 trt_spdk_TESTS_SRC = $(patsubst $(build_DIR)/%, $(src_DIR)/%.cc, $(trt_spdk_TESTS))
 trt_spdk_TESTS_OBJ = $(patsubst %, %.o, $(trt_spdk_TESTS))
 
+trt_spdk_bdev_TESTS = \
+  $(build_DIR)/tests/spdk_bdev_test                   \
+  $(build_DIR)/benchs/spdk_bdev_bench                 \
+
+trt_spdk_bdev_TESTS_SRC = $(patsubst $(build_DIR)/%, $(src_DIR)/%.cc, $(trt_spdk_bdev_TESTS))
+trt_spdk_bdev_TESTS_OBJ = $(patsubst %, %.o, $(trt_spdk_bdev_TESTS))
+
+SPDK_BDEV_INC = $(SPDK_INC) -Iexternal/spdk/module/bdev/malloc
+SPDK_BDEV_LIBS = \
+             -Wl,--whole-archive \
+             -Wl,--no-as-needed \
+             external/spdk/build/lib/libspdk_event.a \
+             external/spdk/build/lib/libspdk_event_bdev.a \
+             external/spdk/build/lib/libspdk_event_accel.a \
+             external/spdk/build/lib/libspdk_event_iobuf.a \
+             external/spdk/build/lib/libspdk_event_sock.a \
+             external/spdk/build/lib/libspdk_event_keyring.a \
+             external/spdk/build/lib/libspdk_event_vmd.a \
+             external/spdk/build/lib/libspdk_event_scheduler.a \
+             external/spdk/build/lib/libspdk_init.a \
+             external/spdk/build/lib/libspdk_bdev.a \
+             external/spdk/build/lib/libspdk_bdev_malloc.a \
+             external/spdk/build/lib/libspdk_accel.a \
+             external/spdk/build/lib/libspdk_thread.a \
+             external/spdk/build/lib/libspdk_notify.a \
+             external/spdk/build/lib/libspdk_trace.a \
+             external/spdk/build/lib/libspdk_sock.a \
+             external/spdk/build/lib/libspdk_sock_posix.a \
+             -Wl,--no-whole-archive \
+             external/spdk/build/lib/libspdk_vmd.a \
+             external/spdk/build/lib/libspdk_nvme.a \
+             external/spdk/build/lib/libspdk_env_dpdk.a \
+             external/spdk/build/lib/libspdk_rpc.a \
+             external/spdk/build/lib/libspdk_jsonrpc.a \
+             external/spdk/build/lib/libspdk_json.a \
+             external/spdk/build/lib/libspdk_util.a \
+             external/spdk/build/lib/libspdk_log.a \
+             external/spdk/build/lib/libspdk_keyring.a \
+             external/spdk/build/lib/libspdk_dma.a \
+             -Lexternal/spdk/dpdk/build/lib \
+             -Wl,-rpath=external/spdk/dpdk/build/lib \
+             -lrte_eal -lrte_mempool -lrte_ring -lrte_telemetry \
+             -lrte_pci -lrte_bus_pci -lrte_mempool_ring \
+             -lrte_kvargs -lrte_log \
+             external/spdk/isa-l/.libs/libisal.a \
+             external/spdk/isa-l-crypto/.libs/libisal_crypto.a \
+             -lssl -lcrypto \
+             -ldl -lrt -lnuma -luuid -lm -laio
+
 trt_rdma_TESTS = $(build_DIR)/tests/trt_rdma_echo
 
 SPDK_INC   = -Iexternal/spdk/include -Iexternal/spdk/dpdk/build/include
@@ -184,6 +233,7 @@ all_TESTS = $(trt_TESTS)
 ifeq (1, $(BUILD_SPDK))
       CFLAGS_          += -msse4 -Wno-volatile
       all_TESTS        += $(trt_spdk_TESTS)
+      all_TESTS        += $(trt_spdk_bdev_TESTS)
 endif
 ifeq (1, $(BUILD_RDMA))
       all_TESTS   += $(trt_rdma_TESTS)
@@ -294,6 +344,10 @@ $(trt_spdk_TESTS_OBJ): $(build_DIR)/%.o: $(src_DIR)/%.cc
 	$(CXX) $(CXXFLAGS) $(SPDK_INC) -c $< -o $@
 	$(CXX) $(CXXFLAGS) $(SPDK_INC) -MM $< -MT $@ -MF $(build_DIR)/$*.d
 
+$(trt_spdk_bdev_TESTS_OBJ): $(build_DIR)/%.o: $(src_DIR)/%.cc
+	$(CXX) $(CXXFLAGS) $(SPDK_BDEV_INC) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(SPDK_BDEV_INC) -MM $< -MT $@ -MF $(build_DIR)/$*.d
+
 # Binaries
 
 $(trt_TESTS): %: $(build_DIR)/libtrt.o %.o
@@ -301,6 +355,9 @@ $(trt_TESTS): %: $(build_DIR)/libtrt.o %.o
 
 $(trt_spdk_TESTS): %: $(build_DIR)/libtrt.o $(spdk_OBJ) %.o
 	$(CXX) $^ $(LDFLAGS) $(SPDK_LIBS) $(LIBS) -o $@
+
+$(trt_spdk_bdev_TESTS): %: %.o
+	$(CXX) $^ $(LDFLAGS) $(SPDK_BDEV_LIBS) -lpthread -o $@
 
 $(build_DIR)/tests/trt_rdma_echo: $(build_DIR)/libtrt.o $(rdma_OBJ) $(build_DIR)/tests/trt_rdma_echo.o
 	$(CXX) $^ $(LDFLAGS) $(LIBS) -o $@
@@ -316,6 +373,7 @@ clean:
 	rm -f $(trt_TESTS)
 	rm -f $(jctx_TESTS)
 	rm -f $(trt_spdk_TESTS)
+	rm -f $(trt_spdk_bdev_TESTS)
 	rm -f $(trt_rdma_TESTS)
 	cd external/liburing && make clean && cd -
 

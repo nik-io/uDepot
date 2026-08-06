@@ -27,5 +27,6 @@ test/uDepot/memcache/udepot-memcache-test
 test/uDeopt/udepot-test
 test/uDeopt/udepot-trt-test
 test/uDepot/udepot-net-ubench
+bench/io_layer_bench
 salsa/src/frontends/usalsa++/build/
 python/pyudepot/libpyudepot.so
