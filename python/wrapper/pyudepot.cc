@@ -20,24 +20,35 @@
 
 extern "C" {
 
-void * uDepotOpen(const char *const fname, const uint64_t size, const int force_destroy) {
+static void * uDepotOpenImpl(const char *const fname, const uint64_t size, const int force_destroy, const int backend_type) {
 	udepot::KV_conf conf (fname, size, force_destroy, 4096 /* grain */, (1<<19) /* segment */);
-	if (0 == strncmp("/dev/shm/", fname, sizeof("/dev/shm")))
-		conf.type_m = udepot::KV_conf::KV_UDEPOT_SALSA; // shm doesn't work with o_direct
-	else
+	if (backend_type > 0 && udepot::KV_conf::valid_kv_type(static_cast<udepot::KV_conf::kv_type>(backend_type))) {
+		conf.type_m = static_cast<udepot::KV_conf::kv_type>(backend_type);
+	} else if (0 == strncmp("/dev/shm/", fname, sizeof("/dev/shm"))) {
+		conf.type_m = udepot::KV_conf::KV_UDEPOT_SALSA;
+	} else {
 		conf.type_m = udepot::KV_conf::KV_UDEPOT_SALSA_O_DIRECT;
+	}
 	::KV *const KV = udepot::KV_factory::KV_new(conf);
 	if (nullptr == KV) {
-		fprintf(stderr, "failed to create uDepot instance\n");
+		fprintf(stderr, "failed to create uDepot instance for backend %d\n", static_cast<int>(conf.type_m));
 		return nullptr;
 	}
 	int rc = KV->init();
 	if (0 != rc) {
-		fprintf(stderr, "failed to create uDepot instance\n");
+		fprintf(stderr, "failed to init uDepot instance err=%s\n", strerror(rc));
 		delete KV;
 		return nullptr;
 	}
 	return static_cast<void *>(KV);
+}
+
+void * uDepotOpen(const char *const fname, const uint64_t size, const int force_destroy) {
+	return uDepotOpenImpl(fname, size, force_destroy, 0);
+}
+
+void * uDepotOpenWithBackend(const char *const fname, const uint64_t size, const int force_destroy, const int backend_type) {
+	return uDepotOpenImpl(fname, size, force_destroy, backend_type);
 }
 
 void uDepotClose(void *const kv_p) {
