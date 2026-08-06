@@ -22,6 +22,7 @@ else:
     libudepot = cdll.LoadLibrary("libpyudepot.so")
 
 pyopen = libudepot.uDepotOpen
+pyopen_backend = libudepot.uDepotOpenWithBackend
 pyclose = libudepot.uDepotClose
 pyget = libudepot.uDepotGet
 pyput = libudepot.uDepotPut
@@ -30,19 +31,36 @@ pyexists = libudepot.uDepotExists
 
 
 pyopen.argtypes  = [c_char_p, c_ulonglong, c_int]
+pyopen_backend.argtypes = [c_char_p, c_ulonglong, c_int, c_int]
 pyclose.argtypes = [c_void_p]
 pyget.argtypes   = [c_void_p, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_uint, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_ulonglong]
 pyput.argtypes   = [c_void_p, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_uint, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_ulonglong]
 pydel.argtypes   = [c_void_p, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_uint]
 pyexists.argtypes = [c_void_p, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_uint, POINTER(c_ulonglong)]
 pyexists.restype  = c_int
+BACKEND_POSIX = 2
+BACKEND_O_DIRECT = 3
+BACKEND_SPDK = 4
+BACKEND_TRT_AIO = 5
+BACKEND_TRT_URING = 6
+BACKEND_TRT_SPDK = 7
+
 class uDepot:
     def __init__(self, **kwargs):
         self._fname = kwargs.get('file_name', '/tmp/pyudepot-test')
         self._size = kwargs.get('size', 1024*1024+4096)
-        self._kv=pyopen(self._fname.encode('utf-8'), self._size, 0)
+        self._backend = kwargs.get('backend', 0)
+        self._force_destroy = 1 if kwargs.get('force_destroy', False) else 0
+        if self._backend:
+            self._kv = pyopen_backend(
+                self._fname.encode('utf-8'), self._size,
+                self._force_destroy, self._backend)
+        else:
+            self._kv = pyopen(
+                self._fname.encode('utf-8'), self._size, self._force_destroy)
         if 0 == self._kv:
-            raise IOError('failed to spawn uDepot for {}'.format(self._fname))
+            raise IOError('failed to spawn uDepot for {} (backend={})'.format(
+                self._fname, self._backend))
         atexit.register(self.__cleanup)
 
     def __cleanup(self):

@@ -417,6 +417,9 @@ run_trt_tests: $(TESTS)
 run_pyudepot_test: python/test-pyudepot.py $(LIBPYUDEPOT)
 	@$(call do_run_test, LD_LIBRARY_PATH=python/pyudepot/:$$LD_LIBRARY_PATH PYTHONPATH=python/:$$PYTHONPATH python3 python/test-pyudepot.py)
 
+run_pyudepot_backend_test: python/test-pyudepot-backends.py $(LIBPYUDEPOT)
+	@$(call do_run_test, LD_LIBRARY_PATH=python/pyudepot/:$$LD_LIBRARY_PATH PYTHONPATH=python/:$$PYTHONPATH python3 python/test-pyudepot-backends.py)
+
 %.o: %.cc Makefile
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
