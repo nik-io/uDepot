@@ -1,6 +1,7 @@
 [submodule "external/cityhash"]
 	path = external/cityhash
 	url = https://github.com/google/cityhash.git
+	ignore = dirty
 [submodule "trt/external/spdk"]
 	path = trt/external/spdk
 	url = https://github.com/spdk/spdk.git
