@@ -175,7 +175,7 @@ Conf parse_args(int argc, char *argv[]) {
     return cnf;
 }
 
-static void *
+static trt::CoroTask
 t_worker(void *arg_) {
     TaskArg *arg = static_cast<TaskArg *>(arg_);
     size_t dev_lbas = arg->spdk_qp->get_nsectors();
@@ -184,16 +184,16 @@ t_worker(void *arg_) {
 
     for (size_t i=0; i < arg->nr_ops; i++) {
         size_t lba0 = (trt::T::rand() % (dev_lbas - arg->op_nlbas));
-        trt::SPDK::read(arg->spdk_qp, arg->op_buff, lba0, arg->op_nlbas);
+        co_await trt::SPDK::read(arg->spdk_qp, arg->op_buff, lba0, arg->op_nlbas);
     }
 
     arg->ap->put_arg(arg);
     *(arg->tasks_completed) += 1;
     //trt_dmsg("DONE\n");
-    return nullptr;
+    co_return 0;
 }
 
-static void *
+static trt::CoroTask
 t_spawner(void *arg_) {
     //trt_dmsg("spawner task: enter\n");
     SpawnerArg *arg = static_cast<SpawnerArg *>(arg_);
@@ -211,7 +211,7 @@ t_spawner(void *arg_) {
         assert(tasks_executing <= arg->tasks_executing_max);
         size_t spawn_tasks_nr = arg->tasks_executing_max - tasks_executing;
         if (spawn_tasks_nr == 0) {
-            trt::T::yield();
+            co_await trt::T::yield();
             continue;
         }
 
@@ -236,18 +236,18 @@ t_spawner(void *arg_) {
 
         //trt_dmsg("Going to spawn: %zd tasks\n", tl.size());
         tasks_spawned += tl.size();
-        trt::T::spawn_many(tl);
-        trt::T::yield();
+        co_await trt::T::spawn_many(tl);
+        co_await trt::T::yield();
     }
     assert(ops_spawned == ops_total);
 
     while (tasks_completed != tasks_spawned)
-        trt::T::yield();
+        co_await trt::T::yield();
 
-    return nullptr;
+    co_return 0;
 }
 
-static void *
+static trt::CoroTask
 t_main(void *arg) {
     ThreadArg *targ = static_cast<ThreadArg *>(arg);
     trt_dmsg("tid=%u\n", targ->tid);
@@ -255,7 +255,7 @@ t_main(void *arg) {
     trt_dmsg("Initializing SPDK\n");
     trt::SPDK::init(targ->spdk_gs);
     trt_dmsg("Spawining SPDK poller\n");
-    trt::T::spawn(trt::SPDK::poller_task, nullptr, nullptr, true, trt::TaskType::TASK);
+    trt::T::spawn_detached_no_wait(trt::SPDK::poller_task, nullptr, trt::TaskType::TASK);
     trt_dmsg("init done\n");
 
     std::vector<SpdkQpair *> qpairs;
@@ -289,8 +289,8 @@ t_main(void *arg) {
     printf("Initialized %zd task arguments (free:%zd)\n", i, spawner_arg.task_args.free_nr());
 
     xtimer_t t; timer_init(&t); timer_start(&t);
-    trt::T::spawn(t_spawner, static_cast<void *>(&spawner_arg), nullptr, false, trt::TaskType::POLL);
-    trt::T::task_wait();
+    co_await trt::T::spawn(t_spawner, static_cast<void *>(&spawner_arg), nullptr, false, trt::TaskType::POLL);
+    co_await trt::T::task_wait();
     timer_pause(&t);
     double s = timer_secs(&t);
     printf("===> time:%lfsecs tput:%lf Mops/sec bw:%lf MiB/sec ops:%lu\n",
@@ -305,7 +305,7 @@ t_main(void *arg) {
         trt::T::set_exit_all();
     }
 
-    return nullptr;
+    co_return 0;
 }
 
 int main(int argc, char *argv[])
