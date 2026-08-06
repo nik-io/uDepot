@@ -13,11 +13,11 @@
 #ifndef SPDK_HH__
 #define SPDK_HH__
 
+#include <string>
 #include <vector>
 #include <unordered_map>
 #include <memory> // shared_ptr
 #include <algorithm> // min
-#include <vector> // min
 
 #include <sys/uio.h> // iovec
 #include <pthread.h> // pthread_self
@@ -51,7 +51,6 @@ struct SpdkState;
 struct SpdkController {
     SpdkGlobalState        *sc_gstate;
     struct spdk_nvme_ctrlr *sc_ctlr;
-    struct spdk_nvme_intel_rw_latency_page *sc_latency_page;
     char sc_name[1024];
     bi::list_member_hook<> sc_lnode;
 };
@@ -65,6 +64,14 @@ struct SpdkNamespace {
     uint32_t get_sector_size(void) { return spdk_nvme_ns_get_sector_size(sn_namespace); }
     uint64_t get_nsectors(void)    { return spdk_nvme_ns_get_num_sectors(sn_namespace); }
     uint64_t get_size(void)        { return spdk_nvme_ns_get_size(sn_namespace); }
+};
+
+struct NvmefTarget {
+    enum Transport { TCP, RDMA };
+    Transport transport;
+    std::string traddr;
+    std::string trsvcid;
+    std::string subnqn;
 };
 
 struct SpdkGlobalState {
@@ -82,13 +89,19 @@ struct SpdkGlobalState {
     NsList sg_namespaces;
     State  sg_state;
     static bool initialized;
+    std::vector<NvmefTarget> sg_nvmef_targets;
 
     int register_controllers(void);
     void unregister_controllers(void);
     void register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns);
+    int probe_nvmef_target(const NvmefTarget &target);
 
    public:
     SpdkGlobalState() : sg_state(State::UNINITIALIZED) {}
+
+    void add_nvmef_target(NvmefTarget target) {
+        sg_nvmef_targets.push_back(std::move(target));
+    }
 
     void init() {
         if (sg_state == State::INITIALIZED)
@@ -132,7 +145,7 @@ struct SpdkQpair {
           sqp_npending(0),
           sqp_state(State::READY),
           sqp_owner(owner) {
-        sqp_qpair = spdk_nvme_ctrlr_alloc_io_qpair(sqp_namespace->sn_ctlr, SPDK_NVME_QPRIO_URGENT);
+        sqp_qpair = spdk_nvme_ctrlr_alloc_io_qpair(sqp_namespace->sn_ctlr, NULL, 0);
         if (!sqp_qpair) {
             fprintf(stderr, "spdk: queue pair allocation failed\n");
             exit(1);

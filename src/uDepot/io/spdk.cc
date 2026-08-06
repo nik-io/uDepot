@@ -28,6 +28,7 @@
 #include "util/debug.h"
 #include "trt_backends/trt_spdk.hh"
 #include "trt_util/spdk.hh"
+#include "trt_util/spdk_compat.hh"
 
 // SPDK IO backend without TRT
 //
@@ -191,7 +192,7 @@ public:
 		pthread_barrier_init(&barrier_m, NULL, sched_nr_m + 1);
 
 		int i = -1;
-		RTE_LCORE_FOREACH_SLAVE(lcore) {
+		RTE_LCORE_FOREACH_WORKER(lcore) {
 			if (_SPDKIOMGR_MAX_SCHED <= (u32) ++i)
 				break;
 			UDEPOT_MSG("spawning scheduler on lcore=%u i=%d", lcore, i);

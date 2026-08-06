@@ -27,6 +27,7 @@
 #if defined(UDEPOT_TRT_SPDK)
 #include <rte_config.h>
 #include <rte_lcore.h>
+#include "trt_util/spdk_compat.hh"
 #endif
 
 #include "util/debug.h"
@@ -1002,7 +1003,7 @@ int main_trt()
 			const unsigned lcores_slaves_nr = lcores_nr - 1;
 			#if !defined(NDEBUG)
 			unsigned lcores_slaves_nr__ = 0;
-			RTE_LCORE_FOREACH_SLAVE(lcore) {
+			RTE_LCORE_FOREACH_WORKER(lcore) {
 				lcores_slaves_nr__++;
 			}
 			assert(lcores_slaves_nr__ == lcores_slaves_nr);
@@ -1015,7 +1016,7 @@ int main_trt()
 			UDEPOT_MSG("lcores=%u lcores_slaves=%u. Spawning %u schedulers.", lcores_nr, lcores_slaves_nr, conf_g.thread_nr_m);
 			prepare_args();
 			int i = -1;
-			RTE_LCORE_FOREACH_SLAVE(lcore) {
+			RTE_LCORE_FOREACH_WORKER(lcore) {
 				if (conf_g.thread_nr_m <= (u32) ++i)
 					break;
 				printf("spawning scheduler on lcore=%u i=%d\n", lcore, i);
