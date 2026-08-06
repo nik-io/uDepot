@@ -108,22 +108,30 @@ ifeq (1, $(BUILD_URING))
 	LIBS += -Ltrt/external/liburing/src -luring
 endif
 
-DPDK_INC   = -I$(TRT_DIR)/external/dpdk/build/include
-SPDK_INC   = $(DPDK_INC) -I$(TRT_DIR)/external/spdk/include
-SPDK_LIBS  = $(TRT_DIR)/external/spdk/build/lib/libspdk_nvme.a     \
-             $(TRT_DIR)/external/spdk/build/lib/libspdk_util.a     \
-             $(TRT_DIR)/external/spdk/build/lib/libspdk_log.a      \
-             $(TRT_DIR)/external/spdk/build/lib/libspdk_env_dpdk.a \
-             -L$(TRT_DIR)/external/dpdk/build/lib \
-             -Wl,-rpath=$(TRT_DIR)/external/dpdk/build/lib \
-             -lrte_eal -lrte_mempool -lrte_ring \
-             -ldl -lrt
+SPDK_DIR   = $(TRT_DIR)/external/spdk
+SPDK_INC   = -I$(SPDK_DIR)/include -I$(SPDK_DIR)/dpdk/build/include
+SPDK_LIBS  = $(SPDK_DIR)/build/lib/libspdk_nvme.a     \
+             $(SPDK_DIR)/build/lib/libspdk_util.a     \
+             $(SPDK_DIR)/build/lib/libspdk_log.a      \
+             $(SPDK_DIR)/build/lib/libspdk_env_dpdk.a \
+             $(SPDK_DIR)/build/lib/libspdk_sock.a     \
+             $(SPDK_DIR)/build/lib/libspdk_json.a     \
+             $(SPDK_DIR)/build/lib/libspdk_jsonrpc.a  \
+             $(SPDK_DIR)/build/lib/libspdk_rpc.a      \
+             $(SPDK_DIR)/build/lib/libspdk_keyring.a  \
+             $(SPDK_DIR)/build/lib/libspdk_dma.a      \
+             -L$(SPDK_DIR)/dpdk/build/lib \
+             -Wl,-rpath=$(SPDK_DIR)/dpdk/build/lib \
+             -lrte_eal -lrte_mempool -lrte_ring -lrte_telemetry \
+             -lrte_pci -lrte_bus_pci \
+             -lssl -lcrypto \
+             -ldl -lrt -lnuma -luuid
 
 LIBCITYHASH_LIB       := $(LIBCITYHASH_DIR)/src/.libs/libcityhash.a
 LIBUSALSA_OBJ         := $(SALSA_DIR)/src/frontends/usalsa++/build/libusalsa++.o
 
 ifeq (1, $(BUILD_SPDK))
-	CXXFLAGS              += -msse4
+	CXXFLAGS              += -msse4 -Wno-volatile
 	LIBTRT_OBJ            := $(TRT_DIR)/build/libtrt-rte.o
 else
 	LIBTRT_OBJ            := $(TRT_DIR)/build/libtrt.o
@@ -173,7 +181,7 @@ endif
 all: submodules_ok $(ALL)
 
 ifeq (1, $(BUILD_SPDK))
-submodules_ok: $(LIBCITYHASH_DIR)/configure  $(TRT_DIR)/external/dpdk/Makefile  $(TRT_DIR)/external/spdk/configure
+submodules_ok: $(LIBCITYHASH_DIR)/configure  $(SPDK_DIR)/configure
 else
 submodules_ok: $(LIBCITYHASH_DIR)/configure
 endif

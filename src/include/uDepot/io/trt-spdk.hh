@@ -57,31 +57,45 @@ public:
 		return -1;
 	}
 
-	// Native interface
+	// Native interface — coroutine-based, co_await from TRT tasks.
 	using Ptr = RteAlloc<512>::Ptr;
-	ssize_t pread_native(Ptr buff, size_t len, off_t off);
-	ssize_t pwrite_native(Ptr buff, size_t len, off_t off);
-	ssize_t preadv_native(IoVec<Ptr>  iov, off_t off);
-	ssize_t pwritev_native(IoVec<Ptr> iov, off_t off);
+	trt::CoroTask pread_native(Ptr buff, size_t len, off_t off);
+	trt::CoroTask pwrite_native(Ptr buff, size_t len, off_t off);
+	trt::CoroTask preadv_native(IoVec<Ptr>  iov, off_t off);
+	trt::CoroTask pwritev_native(IoVec<Ptr> iov, off_t off);
 
 	u64 get_size() override {
 		return getThreadQP()->get_size();
 	}
 
 	ssize_t pread(void *buff, size_t len, off_t off) override {
-		return trt::SPDK::pread(getThreadQP(), buff, len, off);
+		return getThreadQP()->read_sync(buff, len, off);
 	}
 
 	ssize_t preadv(const struct iovec *iov, int iovcnt, off_t off) override {
-		return trt::SPDK::preadv(getThreadQP(), iov, iovcnt, off);
+		ssize_t tot = 0;
+		for (int i = 0; i < iovcnt; i++) {
+			ssize_t r = getThreadQP()->read_sync(iov[i].iov_base, iov[i].iov_len, off + tot);
+			if (r == -1) return -1;
+			tot += r;
+			if (static_cast<size_t>(r) != iov[i].iov_len) break;
+		}
+		return tot;
 	}
 
 	ssize_t pwrite(const void *buff, size_t len, off_t off) override {
-		return trt::SPDK::pwrite(getThreadQP(), buff, len, off);
+		return getThreadQP()->write_sync(buff, len, off);
 	}
 
 	ssize_t pwritev(const struct iovec *iov, int iovcnt, off_t off) override {
-		return trt::SPDK::pwritev(getThreadQP(), iov, iovcnt, off);
+		ssize_t tot = 0;
+		for (int i = 0; i < iovcnt; i++) {
+			ssize_t r = getThreadQP()->write_sync(iov[i].iov_base, iov[i].iov_len, off + tot);
+			if (r == -1) return -1;
+			tot += r;
+			if (static_cast<size_t>(r) != iov[i].iov_len) break;
+		}
+		return tot;
 	}
 
 	void *mmap(void *addr, size_t len, int prot, int flags, off_t off) override;

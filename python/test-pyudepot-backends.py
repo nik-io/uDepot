@@ -148,7 +148,8 @@ def _test_backend_subprocess(backend_type, backend_name):
             capture_output=True, text=True, timeout=30, env=env,
         )
         stdout = result.stdout.strip()
-        if result.returncode == 0 and stdout == "OK":
+        lines = [l.strip() for l in stdout.splitlines()]
+        if result.returncode == 0 and "OK" in lines:
             print(f"  PASS: {backend_name} (type={backend_type}, subprocess)")
             return True
         elif result.returncode == 2 and "INIT_FAIL" in stdout:

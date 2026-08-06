@@ -209,7 +209,9 @@ void TrtFileIOUring::thread_init() {
 	trt_dmsg("spawing iou_poller\n");
 	trt::IOU::init();
 	trt_dmsg("state initialized=%d\n", trt::IOU::is_initialized());
-	trt::T::spawn_detached_no_wait(trt::IOU::poller_task, nullptr, trt::TaskType::TASK);
+	if (trt::T::in_trt()) {
+		trt::T::spawn_detached_no_wait(trt::IOU::poller_task, nullptr, trt::TaskType::TASK);
+	}
 }
 
 void TrtFileIOUring::thread_exit() {

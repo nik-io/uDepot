@@ -147,17 +147,23 @@ trt_spdk_TESTS_OBJ = $(patsubst %, %.o, $(trt_spdk_TESTS))
 
 trt_rdma_TESTS = $(build_DIR)/tests/trt_rdma_echo
 
-DPDK_INC   = -Iexternal/dpdk/build/include
-SPDK_INC   = $(DPDK_INC) -Iexternal/spdk/include
+SPDK_INC   = -Iexternal/spdk/include -Iexternal/spdk/dpdk/build/include
 SPDK_LIBS  = external/spdk/build/lib/libspdk_nvme.a     \
              external/spdk/build/lib/libspdk_util.a     \
              external/spdk/build/lib/libspdk_log.a      \
              external/spdk/build/lib/libspdk_env_dpdk.a \
-             -lpciaccess \
-             -Lexternal/dpdk/build/lib \
-             -Wl,-rpath=external/dpdk/build/lib \
-             -lrte_eal -lrte_mempool -lrte_ring \
-             -ldl -lrt
+             external/spdk/build/lib/libspdk_sock.a     \
+             external/spdk/build/lib/libspdk_json.a     \
+             external/spdk/build/lib/libspdk_jsonrpc.a  \
+             external/spdk/build/lib/libspdk_rpc.a      \
+             external/spdk/build/lib/libspdk_keyring.a  \
+             external/spdk/build/lib/libspdk_dma.a      \
+             -Lexternal/spdk/dpdk/build/lib \
+             -Wl,-rpath=external/spdk/dpdk/build/lib \
+             -lrte_eal -lrte_mempool -lrte_ring -lrte_telemetry \
+             -lrte_pci -lrte_bus_pci \
+             -lssl -lcrypto \
+             -ldl -lrt -lnuma -luuid
 
 spdk_SRC = $(trt_backends_DIR)/trt_spdk.cc  $(src_DIR)/trt_util/spdk.cc
 spdk_OBJ = $(call transform_SRC, $(spdk_SRC),%.o)
@@ -176,7 +182,7 @@ trt_backends_DEP = $(call transform_SRC, $(trt_backends_SRC),%.d)
 
 all_TESTS = $(trt_TESTS)
 ifeq (1, $(BUILD_SPDK))
-      CFLAGS_          += -msse4
+      CFLAGS_          += -msse4 -Wno-volatile
       all_TESTS        += $(trt_spdk_TESTS)
 endif
 ifeq (1, $(BUILD_RDMA))
@@ -222,11 +228,8 @@ builddirs:
 	[ -d $(build_DIR)/benchs ] || mkdir $(build_DIR)/benchs
 
 build_spdk:
-	cd external/dpdk && git reset --hard && patch -p1 < ../dpdk.patch
-	# cd external/dpdk && EXTRA_CFLAGS="-fPIC" make -j10 install T=x86_64-native-linuxapp-gcc DESTDIR=dpdk
-	cd external/dpdk; make clean; make config T=x86_64-native-linuxapp-gcc && CONFIG_RTE_BUILD_COMBINE_LIBS=y MODULE_CFLAGS="-Wno-implicit-fallthrough -Wno-address-of-packed-member -Wno-stringop-overflow -Wno-incompatible-pointer-types" EXTRA_CFLAGS="-msse4.2 -fPIC" make -j10
-	cd external/spdk && git reset --hard && patch -p1 < ../spdk.patch
-	cd external/spdk; make clean; ./configure --with-dpdk=../dpdk && make -j DPDK_DIR=../dpdk/build
+	cd external/spdk && git submodule update --init dpdk
+	cd external/spdk && ./configure --with-shared --without-isal && make -j
 
 build_uring:
 	cd external/liburing && CFLAGS="-fpic -fPIC" CPPFLAGS="-fpic -fPIC" LINK_FLAGS="-fpic -fPIC" make

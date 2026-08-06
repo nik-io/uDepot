@@ -21,7 +21,6 @@
 
 #include <spdk/nvme.h>
 #include <spdk/env.h>
-#include "spdk/nvme_intel.h"
 
 extern "C" {
 
@@ -93,26 +92,11 @@ SpdkGlobalState::register_ctrlr(struct spdk_nvme_ctrlr *ctrlr) {
 
     c->sc_gstate = this;
     c->sc_ctlr = ctrlr;
-    c->sc_latency_page =
-        (struct spdk_nvme_intel_rw_latency_page *)rte_zmalloc(
-            "nvme latency", sizeof(struct spdk_nvme_intel_rw_latency_page),
-            4096);
-    if (c->sc_latency_page == NULL) {
-        printf("Allocation error (latency page)\n");
-        exit(1);
-    }
 
     snprintf(c->sc_name, sizeof(c->sc_name), "%-20.20s (%-20.20s)",
              cdata->mn, cdata->sn);
 
     sg_controllers.push_back(*c);
-
-    #if 0
-    if (g_latency_tracking_enable &&
-        spdk_nvme_ctrlr_is_feature_supported(
-            ctrlr, SPDK_NVME_INTEL_FEAT_LATENCY_TRACKING))
-        set_latency_tracking_feature(ctrlr, true);
-    #endif
 
     num_ns = spdk_nvme_ctrlr_get_num_ns(ctrlr);
     for (nsid = 1; nsid <= num_ns; nsid++) {
@@ -122,29 +106,12 @@ SpdkGlobalState::register_ctrlr(struct spdk_nvme_ctrlr *ctrlr) {
 
 static bool probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
                      struct spdk_nvme_ctrlr_opts *opts) {
-	struct spdk_pci_addr	pci_addr;
-	struct spdk_pci_device	*pci_dev;
-	struct spdk_pci_id	pci_id;
-
 	if (trid->trtype != SPDK_NVME_TRANSPORT_PCIE) {
 		printf("Attaching to NVMe over Fabrics controller at %s:%s: %s\n",
 		       trid->traddr, trid->trsvcid,
 		       trid->subnqn);
 	} else {
-		if (spdk_pci_addr_parse(&pci_addr, trid->traddr)) {
-			return false;
-		}
-
-		pci_dev = spdk_pci_get_device(&pci_addr);
-		if (!pci_dev) {
-			return false;
-		}
-
-		pci_id = spdk_pci_device_get_id(pci_dev);
-
-		printf("Attaching to NVMe Controller at %s [%04x:%04x]\n",
-		       trid->traddr,
-		       pci_id.vendor_id, pci_id.device_id);
+		printf("Attaching to NVMe Controller at %s\n", trid->traddr);
 	}
 
     return true;
@@ -154,29 +121,12 @@ static void
 attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	  struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_ctrlr_opts *opts)
 {
-	struct spdk_pci_addr	pci_addr;
-	struct spdk_pci_device	*pci_dev;
-	struct spdk_pci_id	pci_id;
-
 	if (trid->trtype != SPDK_NVME_TRANSPORT_PCIE) {
 		printf("Attached to NVMe over Fabrics controller at %s:%s: %s\n",
 		       trid->traddr, trid->trsvcid,
 		       trid->subnqn);
 	} else {
-		if (spdk_pci_addr_parse(&pci_addr, trid->traddr)) {
-			return;
-		}
-
-		pci_dev = spdk_pci_get_device(&pci_addr);
-		if (!pci_dev) {
-			return;
-		}
-
-		pci_id = spdk_pci_device_get_id(pci_dev);
-
-		printf("Attached to NVMe Controller at %s [%04x:%04x]\n",
-		       trid->traddr,
-		       pci_id.vendor_id, pci_id.device_id);
+		printf("Attached to NVMe Controller at %s\n", trid->traddr);
 	}
 
     SpdkGlobalState *spdk = static_cast<SpdkGlobalState *>(cb_ctx);
@@ -215,7 +165,11 @@ spdk_init(void)
 
     // NB: spdk_env_init() calls rte_eal_init().
     // It seems that it would be tricky if we want to initialize dpdk as well
-    spdk_env_init(&opts);
+    int rc = spdk_env_init(&opts);
+    if (rc) {
+        fprintf(stderr, "spdk_env_init() failed: %d\n", rc);
+        return 1;
+    }
 
     return 0;
 }
@@ -245,6 +199,43 @@ int SpdkGlobalState::register_controllers(void) {
         return 1;
     }
 
+    for (const auto &target : sg_nvmef_targets) {
+        err = probe_nvmef_target(target);
+        if (err) {
+            fprintf(stderr, "Failed to connect to NVMeoF target %s:%s\n",
+                    target.traddr.c_str(), target.trsvcid.c_str());
+        }
+    }
+
+    return 0;
+}
+
+int SpdkGlobalState::probe_nvmef_target(const NvmefTarget &target) {
+    struct spdk_nvme_transport_id trid = {};
+
+    switch (target.transport) {
+    case NvmefTarget::TCP:
+        trid.trtype = SPDK_NVME_TRANSPORT_TCP;
+        break;
+    case NvmefTarget::RDMA:
+        trid.trtype = SPDK_NVME_TRANSPORT_RDMA;
+        break;
+    }
+
+    trid.adrfam = SPDK_NVMF_ADRFAM_IPV4;
+    snprintf(trid.traddr, sizeof(trid.traddr), "%s", target.traddr.c_str());
+    snprintf(trid.trsvcid, sizeof(trid.trsvcid), "%s", target.trsvcid.c_str());
+    snprintf(trid.subnqn, sizeof(trid.subnqn), "%s", target.subnqn.c_str());
+
+    printf("Connecting to NVMeoF target at %s:%s (%s)\n",
+           trid.traddr, trid.trsvcid, trid.subnqn);
+
+    if (spdk_nvme_probe(&trid, this, probe_cb, attach_cb, NULL) != 0) {
+        fprintf(stderr, "spdk_nvme_probe() failed for NVMeoF target %s:%s\n",
+                trid.traddr, trid.trsvcid);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -259,12 +250,6 @@ void SpdkGlobalState::unregister_controllers(void)
 	while (sg_controllers.size() != 0) {
 		SpdkController &c = sg_controllers.front();
 		sg_controllers.pop_front();
-		rte_free(c.sc_latency_page);
-		#if 0
-		if (g_latency_tracking_enable &&
-		    spdk_nvme_ctrlr_is_feature_supported(entry->ctrlr, SPDK_NVME_INTEL_FEAT_LATENCY_TRACKING))
-			set_latency_tracking_feature(entry->ctrlr, false);
-		#endif
 		free(&c);
 	}
 

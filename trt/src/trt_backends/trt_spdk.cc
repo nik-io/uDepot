@@ -80,7 +80,7 @@ bool SpdkRawAwaitable::await_ready() noexcept
 
 bool SpdkRawAwaitable::await_suspend(std::coroutine_handle<> h) noexcept
 {
-    TaskBase *t = localScheduler__->s_current_;
+    TaskBase *t = localScheduler__->current_task();
     t->set_current_coro(h);
     lsao_.set_waiter(t);
     return true;
@@ -160,7 +160,7 @@ bool SpdkIOAwaitable::await_ready() noexcept
 
 bool SpdkIOAwaitable::await_suspend(std::coroutine_handle<> h) noexcept
 {
-    TaskBase *t = localScheduler__->s_current_;
+    TaskBase *t = localScheduler__->current_task();
     t->set_current_coro(h);
     lsao_.set_waiter(t);
     return true;

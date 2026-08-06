@@ -16,11 +16,10 @@
 #include "uDepot/io/spdk-common.hh"
 
 #include "trt_util/rte.hh"
+#include "trt_backends/trt_spdk.hh"
 
 #include <map>
 #include <functional>
-
-struct SpdkQpair;
 
 namespace udepot {
 
@@ -63,10 +62,10 @@ public:
 	int munmap(void *addr, size_t len);
 
 	using Ptr = RteAlloc<512>::Ptr;
-	ssize_t pread_native(Ptr buff, size_t len, off_t off);
-	ssize_t pwrite_native(Ptr buff, size_t len, off_t off);
-	ssize_t preadv_native(IoVec<Ptr>  iov, off_t off);
-	ssize_t pwritev_native(IoVec<Ptr> iov, off_t off);
+	trt::CoroTask pread_native(Ptr buff, size_t len, off_t off);
+	trt::CoroTask pwrite_native(Ptr buff, size_t len, off_t off);
+	trt::CoroTask preadv_native(IoVec<Ptr>  iov, off_t off);
+	trt::CoroTask pwritev_native(IoVec<Ptr> iov, off_t off);
 
 private:
 	std::map<void *, mregion> mmap_off_m;

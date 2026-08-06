@@ -16,6 +16,7 @@
 #if defined(UDEPOT_TRT_SPDK)
 #include <rte_config.h>
 #include <rte_lcore.h>
+#include "trt_util/spdk_compat.hh"
 #endif
 
 #include"util/debug.h"
@@ -405,7 +406,7 @@ static int memcache_server_trt()
 		}
 
 		conf_g.thread_nr_m = std::min(conf_g.thread_nr_m, lcores_nr);
-		RTE_LCORE_FOREACH_SLAVE(lcore) {
+		RTE_LCORE_FOREACH_WORKER(lcore) {
 			if (conf_g.thread_nr_m <= (u32) ++i)
 				break;
 			printf("spawning scheduler on lcore=%u i=%d\n", lcore, i);

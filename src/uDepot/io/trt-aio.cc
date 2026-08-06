@@ -206,7 +206,9 @@ void TrtFileIO::thread_init() {
 	trt_dmsg("spawing aio_poller\n");
 	trt::AIO::init();
 	trt_dmsg("state initialized=%d\n", trt::AIO::is_initialized());
-	trt::T::spawn_detached_no_wait(trt::AIO::poller_task, nullptr, trt::TaskType::TASK);
+	if (trt::T::in_trt()) {
+		trt::T::spawn_detached_no_wait(trt::AIO::poller_task, nullptr, trt::TaskType::TASK);
+	}
 }
 
 void TrtFileIO::thread_exit() {

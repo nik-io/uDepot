@@ -18,6 +18,7 @@
 //#include <rte_mempool.h>
 //#include <rte_malloc.h>
 #include <rte_lcore.h>
+#include "trt_util/spdk_compat.hh"
 
 #include "trt/uapi/trt.hh"
 #include "trt_backends/trt_spdk.hh"
@@ -335,7 +336,7 @@ int main(int argc, char *argv[])
     // spawn trt schedulers in all slave rte lcores. master core remains idle
     // (makes things simpler).
     unsigned lcore, i=0;
-    RTE_LCORE_FOREACH_SLAVE(lcore) {
+    RTE_LCORE_FOREACH_WORKER(lcore) {
         printf("spawning scheduler on lcore=%u\n", lcore);
         thread_confs.emplace_back(cnf, i, spdk_gs);
         ThreadArg *t_arg = &thread_confs.back();

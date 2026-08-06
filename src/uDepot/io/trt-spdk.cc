@@ -119,63 +119,59 @@ SpdkQpair *TrtSpdkIO::getThreadQP(void) {
 	return SpdkThreadQP__.get();
 }
 
-ssize_t
+trt::CoroTask
 TrtSpdkIO::pread_native(Ptr buff, size_t len, off_t off) {
 	SpdkQpair *qp = getThreadQP();
 	size_t bsize = qp->get_sector_size();
 
-	// Maybe we can do better and somehow return a partial result when we can?
-	// Or copy?
 	if (len % bsize != 0) {
 		UDEPOT_ERR("len (%zd) not aligned to block size (%zd)", len, bsize);
-		errno = -EINVAL;
-		return -1;
+		co_return (trt::RetT)-EINVAL;
 	}
 	if (off % bsize != 0) {
 		UDEPOT_ERR("offset (%zd) not aligned to block size (%zd)", off, bsize);
-		errno = -EINVAL;
-		return -1;
+		co_return (trt::RetT)-EINVAL;
 	}
 
 	uint64_t lba_start = off / bsize;
 	uint64_t nlbas = len / bsize;
 
-	ssize_t ret = trt::SPDK::read(qp, buff, lba_start, nlbas);
-	if (ret == -1)
+	ssize_t ret = (ssize_t)(co_await trt::SPDK::read(qp, buff, lba_start, nlbas));
+	if (ret == -1) {
 		errno = EIO;
+		co_return (trt::RetT)-1;
+	}
 
-	return (ret*bsize);
+	co_return (trt::RetT)(ret * (ssize_t)bsize);
 }
 
-ssize_t
+trt::CoroTask
 TrtSpdkIO::pwrite_native(Ptr buff, size_t len, off_t off) {
 	SpdkQpair *qp = getThreadQP();
 	size_t bsize = qp->get_sector_size();
 
-	// Maybe we can do better and somehow return a partial result when we can?
-	// Or copy?
 	if (len % bsize != 0) {
 		UDEPOT_ERR("len (%zd) not aligned to block size (%zd)", len, bsize);
-		errno = -EINVAL;
-		return -1;
+		co_return (trt::RetT)-EINVAL;
 	}
 	if (off % bsize != 0) {
 		UDEPOT_ERR("offset (%zd) not aligned to block size (%zd)", off, bsize);
-		errno = -EINVAL;
-		return -1;
+		co_return (trt::RetT)-EINVAL;
 	}
 
 	uint64_t lba_start = off / bsize;
 	uint64_t nlbas = len / bsize;
 
-	ssize_t ret = trt::SPDK::write(qp, buff, lba_start, nlbas);
-	if (ret == -1)
+	ssize_t ret = (ssize_t)(co_await trt::SPDK::write(qp, buff, lba_start, nlbas));
+	if (ret == -1) {
 		errno = EIO;
+		co_return (trt::RetT)-1;
+	}
 
-	return (ret*bsize);
+	co_return (trt::RetT)(ret * (ssize_t)bsize);
 }
 
-ssize_t
+trt::CoroTask
 TrtSpdkIO::preadv_native(IoVec<Ptr> iov_, off_t off) {
 	ssize_t tot = 0;
 	int iovcnt = iov_.iov_cnt_m;
@@ -185,19 +181,22 @@ TrtSpdkIO::preadv_native(IoVec<Ptr> iov_, off_t off) {
 		void *iov_base = iov[i].iov_base;
 		size_t iov_len = iov[i].iov_len;
 		auto ptr = Ptr(iov_base, iov_len);
-		ssize_t ret = pread_native(std::move(ptr), iov_len, off + tot);
-		if (ret  == -1)
-			return -1;
-		tot += ret;
-		// partial read, just return what we 've read so far
-		if (static_cast<size_t>(ret) != iov_len)
+		ssize_t ret = (ssize_t)(co_await trt::SPDK::read(
+			getThreadQP(), ptr,
+			(off + tot) / getThreadQP()->get_sector_size(),
+			iov_len / getThreadQP()->get_sector_size()));
+		if (ret == -1)
+			co_return (trt::RetT)-1;
+		ssize_t bytes = ret * (ssize_t)getThreadQP()->get_sector_size();
+		tot += bytes;
+		if (static_cast<size_t>(bytes) != iov_len)
 			break;
 	}
 
-	return tot;
+	co_return (trt::RetT)tot;
 }
 
-ssize_t
+trt::CoroTask
 TrtSpdkIO::pwritev_native(IoVec<Ptr> iov_, off_t off) {
 	ssize_t tot = 0;
 	int iovcnt = iov_.iov_cnt_m;
@@ -207,16 +206,19 @@ TrtSpdkIO::pwritev_native(IoVec<Ptr> iov_, off_t off) {
 		void *iov_base = iov[i].iov_base;
 		size_t iov_len = iov[i].iov_len;
 		auto ptr = Ptr(iov_base, iov_len);
-		ssize_t ret = pwrite_native(std::move(ptr), iov_len, off + tot);
-		if (ret  == -1)
-			return -1;
-		tot += ret;
-		// partial read, just return what we 've read so far
-		if (static_cast<size_t>(ret) != iov_len)
+		ssize_t ret = (ssize_t)(co_await trt::SPDK::write(
+			getThreadQP(), ptr,
+			(off + tot) / getThreadQP()->get_sector_size(),
+			iov_len / getThreadQP()->get_sector_size()));
+		if (ret == -1)
+			co_return (trt::RetT)-1;
+		ssize_t bytes = ret * (ssize_t)getThreadQP()->get_sector_size();
+		tot += bytes;
+		if (static_cast<size_t>(bytes) != iov_len)
 			break;
 	}
 
-	return tot;
+	co_return (trt::RetT)tot;
 }
 
 void *

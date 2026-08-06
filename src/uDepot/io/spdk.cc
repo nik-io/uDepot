@@ -28,6 +28,7 @@
 #include "util/debug.h"
 #include "trt_backends/trt_spdk.hh"
 #include "trt_util/spdk.hh"
+#include "trt_util/spdk_compat.hh"
 
 // SPDK IO backend without TRT
 //
@@ -48,7 +49,7 @@ sys_futex(void *addr1, int op, int v1, struct timespec *t, void *addr2, int v3)
 namespace udepot {
 class SpdkIOMgr;
 class SpdkIOThreadState;
-static void * spdk_io_scheduler(void *arg);
+static trt::CoroTask spdk_io_scheduler(void *arg);
 class SpdkIOMgrThreadState {
 	friend SpdkIO;
 	friend SpdkIOMgr;
@@ -191,7 +192,7 @@ public:
 		pthread_barrier_init(&barrier_m, NULL, sched_nr_m + 1);
 
 		int i = -1;
-		RTE_LCORE_FOREACH_SLAVE(lcore) {
+		RTE_LCORE_FOREACH_WORKER(lcore) {
 			if (_SPDKIOMGR_MAX_SCHED <= (u32) ++i)
 				break;
 			UDEPOT_MSG("spawning scheduler on lcore=%u i=%d", lcore, i);
@@ -430,7 +431,7 @@ struct t_io_arg {
 };
 static_assert(sizeof(void *) == sizeof(t_io_arg), "t_io_arg has to be same size as a ptr");
 
-static void *
+static trt::CoroTask
 spdk_io_task(void *const arg_)
 {
 	t_io_arg targ;
@@ -440,12 +441,10 @@ spdk_io_task(void *const arg_)
 	SpdkIOMgr::SpdkIOSlot &slot = mgr->io_queue_m[id];
 	ssize_t ret = 0;
 	const ssize_t expected = iovec_len(slot.iov, slot.iovcnt);
-	// UDEPOT_ERR("starting IO task dir=%d slot id=%u.", slot.dir, id);
 	if (SPDK_READ == slot.dir)
 		ret = mgr->preadv(slot.iov, slot.iovcnt, slot.off);
 	else
 		ret = mgr->pwritev(slot.iov, slot.iovcnt, slot.off);
-	// UDEPOT_ERR("finishing IO task dir=%d slot id=%u.", slot.dir, id);
 	if (ret < 0)
 		slot.ctx->err = -1;
 	if (expected != ret)
@@ -455,11 +454,10 @@ spdk_io_task(void *const arg_)
 	int rc = sys_futex(&slot.ctx->outstanding, FUTEX_WAKE, INT_MAX, NULL, NULL, 0);
 	if (unlikely(-1 == rc))
 		UDEPOT_ERR("futex wake returned rc=%d errno=%d.", rc, errno);
-	// pthread_cond_signal(slot.ctx->cond);
-	return nullptr;
+	co_return 0;
 }
 
-static void *
+static trt::CoroTask
 spdk_io_scheduler(void *arg)
 {
 	SpdkIOMgr *const mgr = &SpdkIOMgr__;
@@ -489,7 +487,6 @@ spdk_io_scheduler(void *arg)
 	while (!spdkstate->is_done()) {
 		if (mgr->exit_m)
 			trt::SPDK::stop();
-		// try to issue
 		trt::Task::List tl;
 		for (u32 i = id_start; i < id_end; i++) {
 			SpdkIOMgr::SpdkIOSlot &slot = mgr->io_queue_m[i];
@@ -505,11 +502,11 @@ spdk_io_scheduler(void *arg)
 			mgr->ids_m[i] += 1;
 		}
 		if (!tl.empty())
-			trt::T::spawn_many(tl);
-		trt::T::yield();
+			co_await trt::T::spawn_many(tl);
+		co_await trt::T::yield();
 	}
-	trt::T::set_exit_all(); // notify trt schedulers that we are done
-	return nullptr;
+	trt::T::set_exit_all();
+	co_return 0;
 }
 
 void SpdkIO::global_init(void)
@@ -544,7 +541,7 @@ ssize_t SpdkIOMgr::preadv(const struct iovec *const iov, int iovcnt, off_t off)
 	auto dev_qpr = SpdkIOMgrThreadState__.offset_to_qpair(off, true);
 	auto dev_off = SpdkIOMgrThreadState__.dev_offset(off);
 	SpdkPtr buff = SpdkPtr(iov->iov_base, iov->iov_len);
-	ssize_t rc = trt::SPDK::read(dev_qpr, buff, dev_off / 512UL, (u32) (iov->iov_len / 512U));
+	ssize_t rc = dev_qpr->read_raw_sync(buff, dev_off / 512UL, (u32) (iov->iov_len / 512U));
 	if (rc < 0)
 		return rc;
 	return rc * 512LL;
@@ -557,7 +554,7 @@ ssize_t SpdkIOMgr::pwritev(const struct iovec *iov, int iovcnt, off_t off)
 	auto dev_qpr = SpdkIOMgrThreadState__.offset_to_qpair(off, false);
 	auto dev_off = SpdkIOMgrThreadState__.dev_offset(off);
 	SpdkPtr buff = SpdkPtr(iov->iov_base, iov->iov_len);
-	ssize_t rc = trt::SPDK::write(dev_qpr, buff, dev_off / 512UL, (u32) (iov->iov_len / 512U));
+	ssize_t rc = dev_qpr->write_raw_sync(buff, dev_off / 512UL, (u32) (iov->iov_len / 512U));
 	if (rc < 0)
 		return rc;
 	return rc * 512LL;
