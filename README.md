@@ -202,41 +202,56 @@ those writes fail with `EINVAL`. Use `--grain-size 512` or `4096`; the small
 32-byte-grain examples in this repo all run against `/dev/shm`, which is
 buffered and has no such constraint.
 
-### Running the SPDK backend without NVMe hardware
+### Testing the SPDK backend without NVMe hardware
 
-The SPDK backends (`-u 7`, `-u 8`) normally bind a local PCIe NVMe device. To
-exercise them on a machine that has none -- a laptop, a container, CI -- export
-a memory-backed namespace from SPDK's own NVMe-oF target and point uDepot at it
-over TCP loopback:
+**What works today:** the TRT-level SPDK tests, which drive SPDK's bdev layer
+against a memory-backed (malloc) bdev and need no hardware:
 
 ```
-# 1. hugepages (SPDK/DPDK requirement)
+$ make -C trt BUILD_SPDK=1 run_spdk_bdev_test   # unit
+$ make -C trt BUILD_SPDK=1 run_spdk_bdev_perf   # perf, reported not asserted
+```
+
+Both reserve hugepages and give them back afterwards, including on failure.
+
+**What does not work yet — the uDepot KV layer on SPDK.** uDepot's SPDK backend
+uses the raw NVMe driver (`spdk_nvme_*`), not the bdev layer, so a malloc bdev
+is only reachable by exporting it as an NVMe namespace over NVMe-oF. That path
+brings the KV store up but does not complete I/O:
+
+```
+# target side
 $ sudo sh -c 'echo 1536 > /proc/sys/vm/nr_hugepages'
 $ sudo mkdir -p /dev/hugepages && sudo mount -t hugetlbfs nodev /dev/hugepages
-
-# 2. start the soft target and export a 256MiB malloc-backed namespace
-$ sudo trt/external/spdk/build/bin/nvmf_tgt -m 0x3 -s 1024 &
+$ sudo trt/external/spdk/build/bin/nvmf_tgt -m 0x1 -s 512 &
 $ R=trt/external/spdk/scripts/rpc.py
 $ sudo $R nvmf_create_transport -t TCP
 $ sudo $R bdev_malloc_create 513 512 -b Malloc0   # note: NOT a round 512
 $ sudo $R nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001
 $ sudo $R nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Malloc0
-$ sudo $R nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 \
-      -t tcp -a 127.0.0.1 -s 4420
+$ sudo $R nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t tcp -a 127.0.0.1 -s 4420
 
-# 3. point the benchmark at it
+# uDepot side
 $ sudo bench/io_layer_bench --compare --spdk \
       --nvmef 127.0.0.1:4420:nqn.2016-06.io.spdk:cnode1 -n 2000
 
-# 4. tear down: stop the target and release the hugepages
-$ sudo pkill nvmf_tgt
-$ sudo umount /dev/hugepages
+# teardown -- hugepages stay reserved until released
+$ sudo pkill nvmf_tgt && sudo umount /dev/hugepages
 $ sudo sh -c 'echo 0 > /proc/sys/vm/nr_hugepages'
 ```
 
-The namespace is memory-backed, so it disappears with the target -- nothing to
-clean up on disk. Remember step 4: hugepages stay reserved (and unavailable to
-everything else) until released.
+uDepot attaches to the controller, finds the namespace and initialises the
+store, then stops servicing the connection; the target eventually logs
+`nvmf_ctrlr_keep_alive_poll: Disconnecting host ... due to keep alive timeout`
+and no I/O completes. The SPDK poller is not being driven. One suspect is that
+`spdk_env_opts.core_mask` is taken from the process CPU affinity
+(`trt/src/trt_util/spdk.cc`), so the client claims every core and overlaps the
+target's busy-polling reactor — unproven.
+
+**TODO:** fix the poller/core-mask problem so the KV layer can be tested on
+SPDK without hardware. Until then the SPDK coverage that runs is the TRT bdev
+test above. The `--spdk` / `--nvmef` options and the NVMe-oF probe support
+exist for this work; they are not part of any test target.
 
 **Device size must not be an exact multiple of the segment size.** uDepot puts
 its device metadata in the tail left over after `align_down(device_size,
@@ -249,8 +264,6 @@ check_dev_size() Not enough spare capacity for device ... physical_size:53687091
 
 This is why the size in the file-backed examples ends in `+1`, and why the
 malloc bdev above is 513MiB rather than 512MiB.
-
-JNI test in `test/jni/uDepotJNITest.java`.
 
 ## Notes
 

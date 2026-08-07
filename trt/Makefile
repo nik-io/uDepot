@@ -1,4 +1,4 @@
-.PHONY: all clean builddirs run_perf_test run_spdk_bdev_test
+.PHONY: all clean builddirs run_perf_test run_spdk_bdev_test run_spdk_bdev_perf
 
 BUILD_SPDK   ?= 0
 BUILD_RDMA   ?= 0
@@ -385,6 +385,7 @@ clean:
 run_perf_test: all
 	build/benchs/trt_aio_bench
 	build/benchs/trt_uring_bench
+	@$(MAKE) run_spdk_bdev_perf
 
 # SPDK bdev unit test. Uses a memory-backed (malloc) bdev, so it needs no NVMe
 # hardware -- this is the SPDK coverage that runs anywhere.
@@ -419,3 +420,31 @@ run_spdk_bdev_test:
 	echo -n "RUNNING TEST: spdk bdev (malloc) ... "; \
 	build/tests/spdk_bdev_test >/dev/null 2>&1 \
 		&& echo "SUCCESS." || { echo "FAILED."; exit 1; }
+
+# SPDK bdev performance run. Reported, not asserted -- like the other raw I/O
+# benchmarks, there is no invariant at this layer and shared-runner throughput
+# is not stable enough to gate on. Same hugepage save/restore as the unit test.
+.PHONY: run_spdk_bdev_perf
+run_spdk_bdev_perf:
+	@set -e; \
+	if [ ! -x build/benchs/spdk_bdev_bench ]; then \
+		echo "SKIP spdk bdev perf: not built (needs BUILD_SPDK=1)"; exit 0; \
+	fi; \
+	if [ ! -w /proc/sys/vm/nr_hugepages ]; then \
+		echo "SKIP spdk bdev perf: cannot reserve hugepages (needs privileges)"; \
+		exit 0; \
+	fi; \
+	PREV_HP=$$(cat /proc/sys/vm/nr_hugepages); \
+	MOUNTED_BY_US=0; \
+	restore() { \
+		[ "$$MOUNTED_BY_US" = "1" ] && umount /dev/hugepages >/dev/null 2>&1 || true; \
+		echo "$$PREV_HP" > /proc/sys/vm/nr_hugepages 2>/dev/null || true; \
+	}; \
+	trap restore EXIT; \
+	if [ "$$PREV_HP" -lt 512 ]; then echo 512 > /proc/sys/vm/nr_hugepages; fi; \
+	if ! mount | grep -q hugetlbfs; then \
+		mkdir -p /dev/hugepages; \
+		mount -t hugetlbfs nodev /dev/hugepages; \
+		MOUNTED_BY_US=1; \
+	fi; \
+	build/benchs/spdk_bdev_bench

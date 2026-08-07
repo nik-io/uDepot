@@ -75,6 +75,13 @@ Tuning: `-n` (ops per phase), `-i` (paired iterations).
 The invariant is checked on every backend the benchmark supports (AIO and
 io_uring). An invariant that only holds on one backend is not an invariant.
 
+SPDK coverage is TRT-level only for now: `make -C trt run_spdk_bdev_test`
+(unit) and `run_spdk_bdev_perf` (reported, not asserted), both against a
+memory-backed bdev so they need no hardware and both restore the hugepages
+they reserve. The KV layer cannot use a bdev directly -- uDepot's SPDK backend
+is the raw NVMe driver -- and the NVMe-oF route that would reach it currently
+stalls after store init. See the TODO in the README.
+
 Notes:
 - Keep `-n` at 200000 or higher. Below roughly 100k ops the PUT phase never
   becomes I/O bound and the comparison inverts at random.
