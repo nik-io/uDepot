@@ -379,7 +379,9 @@ clean:
 
 
 
-# Raw I/O performance regression test (kernel AIO, io_uring, SPDK bdev).
-# Paired A/B against the change's base revision; see bench/perflib.sh.
-run_perf_test:
-	@bench/perf_test.sh
+# Raw I/O benchmarks (kernel AIO, io_uring). These report throughput; there is
+# no invariant to assert at this layer, so they run as a smoke check that the
+# I/O paths still work and CI records the numbers.
+run_perf_test: all
+	build/benchs/trt_aio_bench
+	build/benchs/trt_uring_bench

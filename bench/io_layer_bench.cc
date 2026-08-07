@@ -43,8 +43,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "kv.hh"
 #include "trt_util/timer.h"
@@ -71,9 +73,13 @@ struct bench_conf {
     u32    val_size     = 3072;
     u64    nops         = 200000;
     size_t ntasks       = 128;
+    size_t iterations   = 5;
 };
 
 static bench_conf bconf_g;
+
+// Set by the comparison run; becomes the process exit status.
+static bool compare_failed_g = false;
 
 // ---------------------------------------------------------------------------
 // Non-zero-copy variants (raw buffer KV interface), after put/get_test_thin
@@ -335,23 +341,126 @@ static trt::CoroTask t_main(void *arg__)
     co_return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Paired comparison of the two KV interfaces
+//
+// Runs the raw-buffer and Mbuff variants alternately inside one scheduler,
+// over one store. Alternating is what makes the comparison valid: throughput
+// drifts steadily over a batch -- enough on a cloud container to swamp the
+// effect being measured -- and pairing cancels that drift out of each delta.
+//
+// Both variants write identical key/value content, so they are interchangeable
+// on the same store and the GET phases read the same data.
+// ---------------------------------------------------------------------------
+
+struct sample { double copy, mbuff; };
+
+static double median_of(std::vector<double> v)
+{
+    if (v.empty())
+        return 0.0;
+    std::sort(v.begin(), v.end());
+    const size_t n = v.size();
+    return (n % 2) ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2.0;
+}
+
+// Reports one phase and returns true if the zero-copy path held up.
+static bool compare_phase(const char *phase, const std::vector<sample> &samples)
+{
+    std::vector<double> deltas;
+    unsigned wins = 0;
+    for (const sample &s : samples) {
+        // Both are durations, so a lower mbuff time is the win.
+        const double d = (s.copy - s.mbuff) / s.copy;
+        deltas.push_back(d);
+        if (d > 0)
+            wins++;
+    }
+
+    std::vector<double> copy_secs, mbuff_secs;
+    for (const sample &s : samples) {
+        copy_secs.push_back(s.copy);
+        mbuff_secs.push_back(s.mbuff);
+    }
+
+    const double md = median_of(deltas);
+    printf("%s: n=%zu mbuff faster in %u/%zu pairs\n",
+           phase, samples.size(), wins, samples.size());
+    printf("  raw-buffer median=%.3fs  mbuff median=%.3fs  delta=%+.1f%%\n",
+           median_of(copy_secs), median_of(mbuff_secs), md * 100.0);
+    printf("  pairs:");
+    for (const sample &s : samples)
+        printf(" %.2f->%.2f", s.copy, s.mbuff);
+    printf("\n");
+
+    if (md < 0) {
+        printf("  FAIL: the Mbuff (zero-copy) interface is slower than raw buffers\n");
+        return false;
+    }
+    printf("  OK\n");
+    return true;
+}
+
 template<typename RT>
-static int run_trt(KV_conf *conf)
+static trt::CoroTask t_main_compare(void *arg__)
+{
+    main_arg *arg = static_cast<main_arg *>(arg__);
+
+    int err = ENOMEM;
+    arg->kv = std::shared_ptr<KV>(KV_factory::KV_new(*arg->conf));
+    if (!arg->kv || (err = arg->kv->init()) != 0) {
+        fprintf(stderr, "KV init failed with %d (%s)\n", err, strerror(err));
+        exit(1);
+    }
+
+    KV *kv = arg->kv.get();
+    std::vector<sample> puts, gets;
+    double a, b;
+
+    for (size_t i = 0; i < bconf_g.iterations; i++) {
+        co_await run_phase<RT>(kv, put_thin<RT>, bconf_g.nops, &a);
+        co_await run_phase<RT>(kv, put_thin_mbuff<RT>, bconf_g.nops, &b);
+        puts.push_back({a, b});
+
+        co_await run_phase<RT>(kv, get_thin<RT>, bconf_g.nops, &a);
+        co_await run_phase<RT>(kv, get_thin_mbuff<RT>, bconf_g.nops, &b);
+        gets.push_back({a, b});
+
+        fprintf(stderr, "  [%zu/%zu] put %.2f->%.2f  get %.2f->%.2f\n",
+                i + 1, bconf_g.iterations,
+                puts.back().copy, puts.back().mbuff,
+                gets.back().copy, gets.back().mbuff);
+    }
+
+    bool ok = compare_phase("PUT", puts);
+    ok = compare_phase("GET", gets) && ok;
+    compare_failed_g = !ok;
+
+    kv->shutdown();
+    trt::T::set_exit_all();
+    co_return 0;
+}
+
+template<typename RT>
+static int run_trt(KV_conf *conf, bool compare)
 {
     main_arg arg;
     arg.kv   = nullptr;
     arg.conf = conf;
 
     trt::Controller c;
-    c.spawn_scheduler(t_main<RT>, &arg, trt::TaskType::TASK);
+    c.spawn_scheduler(compare ? t_main_compare<RT> : t_main<RT>,
+                      &arg, trt::TaskType::TASK);
     c.wait_for_all();
-    return 0;
+    return compare_failed_g ? 1 : 0;
 }
 
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "Usage: %s --mbuff|--copy [--aio|--uring] [options]\n"
+        "Usage: %s --mbuff|--copy|--compare [--aio|--uring] [options]\n"
+        "  --compare      run both interfaces alternately and check that the\n"
+        "                 zero-copy one is not slower; non-zero exit on failure\n"
         "  --mbuff        zero-copy Mbuff KV interface (get/put_test_thin_mbuff)\n"
         "  --copy         non-zero-copy raw buffer KV interface (get/put_test_thin)\n"
         "  --aio          TRT AIO backend (default)\n"
@@ -359,14 +468,17 @@ static void usage(const char *prog)
         "  -f FILE        KV store file (default: /tmp/io-layer-bench.udepot)\n"
         "  -n NOPS        operations per phase (default: %lu)\n"
         "  --val-size N   value size in bytes (default: %u)\n"
-        "  --trt-ntasks N tasks per scheduler (default: %zu)\n",
-        prog, (unsigned long)bconf_g.nops, bconf_g.val_size, bconf_g.ntasks);
+        "  --trt-ntasks N tasks per scheduler (default: %zu)\n"
+        "  -i N           paired iterations for --compare (default: %zu)\n",
+        prog, (unsigned long)bconf_g.nops, bconf_g.val_size, bconf_g.ntasks,
+        bconf_g.iterations);
     exit(1);
 }
 
 int main(int argc, char *argv[])
 {
     bool mode_set = false;
+    bool compare = false;
     bool use_uring = false;
     std::string fname = "/tmp/io-layer-bench.udepot";
 
@@ -376,6 +488,8 @@ int main(int argc, char *argv[])
             bconf_g.mode = Mode::MBUFF; mode_set = true;
         } else if (a == "--copy") {
             bconf_g.mode = Mode::COPY;  mode_set = true;
+        } else if (a == "--compare") {
+            compare = true; mode_set = true;
         } else if (a == "--aio") {
             use_uring = false;
         } else if (a == "--uring") {
@@ -388,6 +502,8 @@ int main(int argc, char *argv[])
             bconf_g.val_size = (u32)std::stoul(argv[++i]);
         } else if (a == "--trt-ntasks" && i + 1 < argc) {
             bconf_g.ntasks = std::stoul(argv[++i]);
+        } else if (a == "-i" && i + 1 < argc) {
+            bconf_g.iterations = std::stoul(argv[++i]);
         } else {
             usage(argv[0]);
         }
@@ -410,13 +526,13 @@ int main(int argc, char *argv[])
 
     printf("f:%s mode:%s backend:%s nops:%lu val_size:%u\n",
            fname.c_str(),
-           bconf_g.mode == Mode::MBUFF ? "mbuff" : "copy",
+           compare ? "compare" : (bconf_g.mode == Mode::MBUFF ? "mbuff" : "copy"),
            use_uring ? "uring" : "aio",
            (unsigned long)bconf_g.nops, bconf_g.val_size);
     fflush(stdout);
 
-    int err = use_uring ? run_trt<RuntimeTrtUring>(&conf)
-                        : run_trt<RuntimeTrt>(&conf);
+    int err = use_uring ? run_trt<RuntimeTrtUring>(&conf, compare)
+                        : run_trt<RuntimeTrt>(&conf, compare);
 
     unlink(fname.c_str());
     return err;

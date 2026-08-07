@@ -409,22 +409,21 @@ endif
 udepot-memcache-test: $(MC_SERVER) $(MC_TEST)
 	@$(call do_run_test, test/uDepot/memcache/unit-test.sh bin/udepot-memcache-server test/uDepot/memcache/udepot-memcache-test)
 
-# Performance regression tests.
+# Performance tests.
 #
-# Paired comparisons, never against a recorded baseline -- see
-# trt/bench/perflib.sh for why. Both are slow, so they are separate targets
-# rather than part of run_tests.
-.PHONY: run_perf_test run_perf_zerocopy run_pyudepot_perf_test
+# No baselines and no base-revision builds: throughput on cloud containers
+# drifts more than any regression worth catching. The check that survives that
+# is an invariant measured inside one run -- io_layer_bench --compare runs the
+# raw-buffer and Mbuff interfaces alternately over one store and fails if the
+# zero-copy path is not ahead. CI runs these on every push.
+.PHONY: run_perf_test run_pyudepot_perf_test
 
-# Zero-copy invariant + A/B against the change's base revision.
+# Zero-copy invariant: the Mbuff KV interface must not be slower than raw
+# buffers. Needs >=200k ops, or the PUT phase never becomes I/O bound.
 run_perf_test: bench/io_layer_bench
-	@bench/perf_test.sh
+	@$(call do_run_test, bench/io_layer_bench --compare --aio -n 200000 -i 5)
 
-# Just the zero-copy invariant (no base-revision build).
-run_perf_zerocopy: bench/io_layer_bench
-	@bench/perf_test.sh zerocopy
-
-# Python bindings: their own suite, because the thing under test is Python.
+# Python bindings get a Python suite, since the bindings are what it tests.
 run_pyudepot_perf_test: $(LIBPYUDEPOT)
 	@PERF_PYUDEPOT=1 python3 -m pytest bench/test_pyudepot_perf.py -q
 

@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: build and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libboost-dev zlib1g-dev libaio-dev
+
+      - name: Build (default flags, non-SPDK)
+        run: make -j"$(nproc)"
+
+      - name: Build (io_uring)
+        run: make -j"$(nproc)" BUILD_URING=1
+
+      - name: Unit tests
+        run: make run_tests
+
+  perf:
+    name: performance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libboost-dev zlib1g-dev libaio-dev
+          python3 -m pip install --quiet pytest numpy
+
+      # The zero-copy invariant is measured inside a single run: the two KV
+      # interfaces alternate over one store, so the drift that makes absolute
+      # numbers useless on a shared runner cancels out of each pair.
+      - name: Zero-copy invariant
+        run: make -j"$(nproc)" BUILD_URING=1 run_perf_test
+
+      - name: Python bindings
+        run: make -j"$(nproc)" BUILD_URING=1 run_pyudepot_perf_test
+
+      # Reported, not asserted: raw I/O throughput on a shared runner is not
+      # stable enough to gate on, but the numbers are useful in the log.
+      - name: Raw I/O benchmarks (report only)
+        continue-on-error: true
+        run: make -C trt BUILD_URING=1 run_perf_test

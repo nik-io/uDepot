@@ -49,44 +49,31 @@ Follow the [Google C++ Style Guide](https://google.github.io/styleguide/cppguide
 
 ### Performance tests
 
-Perf tests live with the layer they measure, and are written in that layer's
-language. The C++ layers get shell drivers over the benchmark binaries; only
-the Python bindings get a Python suite, because the bindings are what it
-tests:
+No baselines and no base-revision A/B builds. Throughput on cloud containers
+drifts more than any regression worth catching — one benchmark here moved 30.4s
+to 19.5s across five consecutive iterations on an idle machine. What survives
+that is an invariant measured inside a single run, plus CI running it on every
+push.
 
-| layer | location | language |
+| layer | test | language |
 |---|---|---|
-| raw I/O backends (AIO, io_uring, SPDK) | `trt/bench/perf_test.sh` | shell |
-| uDepot KV interfaces | `bench/perf_test.sh` | shell |
-| pyudepot bindings | `bench/test_pyudepot_perf.py` | python |
+| uDepot KV interfaces | `make run_perf_test` | C++ (`bench/io_layer_bench --compare`) |
+| pyudepot bindings | `make run_pyudepot_perf_test` | python |
+| raw I/O backends | `make -C trt run_perf_test` | C++ (report only, no assertion) |
 
-Shared machinery is in `trt/bench/perflib.sh` — trt is the lowest layer, so
-uDepot sources it without inverting the dependency direction.
+`io_layer_bench --compare` runs the raw-buffer and Mbuff interfaces alternately
+over one store and fails if the zero-copy path is not ahead. Alternating is
+what makes it valid: drift affects both sides of a pair equally and cancels.
 
-Nothing is compared against a recorded baseline: throughput on cloud
-containers drifts more than any regression worth catching. Every comparison
-runs both sides alternately in one batch and reports the per-pair delta, which
-cancels shared drift.
-
-```bash
-make -C trt run_perf_test      # raw I/O, A/B vs the base revision
-make run_perf_test             # KV zero-copy invariant + A/B
-make run_perf_zerocopy         # just the invariant (no base build)
-make run_pyudepot_perf_test    # python bindings
-```
-
-Tuning: `PERF_ITERATIONS` (default 5), `PERF_THRESHOLD` (default 0.10),
-`PERF_OPS`, `PERF_RUN_TIMEOUT`, `PERF_BASE_REF`, `UDEPOT_ROOT`.
+Tuning: `-n` (ops per phase), `-i` (paired iterations).
 
 Notes:
-- `io_layer_bench` needs `-n 200000` or higher for the zero-copy comparison to
-  be meaningful; below roughly 100k ops the PUT phase never becomes I/O bound
-  and the result inverts at random.
-- The io_uring backend currently aborts under any KV workload —
+- Keep `-n` at 200000 or higher. Below roughly 100k ops the PUT phase never
+  becomes I/O bound and the comparison inverts at random.
+- The io_uring backend currently aborts under any KV workload:
   `persist_seg_md()` issues a 64-byte O_DIRECT `pwritev` that fails EINVAL on
   alignment. Reproduces with plain `bin/udepot-test -u 6`, so it predates the
-  perf work. The perf scripts probe each backend first and report this
-  explicitly rather than letting it look like sample noise.
+  perf work and is not fixed here.
 
 ## Build
 
