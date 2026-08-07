@@ -28,6 +28,14 @@
  *  deterministically generated key/value set, exactly as udepot-test does.
  *
  *  Backends: --aio (RuntimeTrt, default) and --uring (RuntimeTrtUring).
+ *
+ *  NOTE on -n: keep it at the default (200k) or higher when comparing the
+ *  two modes. Below roughly 100k ops the store never fills enough for the
+ *  PUT phase to become I/O bound, and the zero-copy difference sits inside
+ *  run-to-run noise -- at 100k the PUT comparison inverts at random, while
+ *  at 200k zero-copy wins every paired run. Compare paired runs (alternate
+ *  the two modes) rather than medians of separate batches: throughput
+ *  drifts steadily across a batch, which biases unpaired medians.
  */
 
 #include <cassert>
