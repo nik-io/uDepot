@@ -4,14 +4,18 @@
  *
  *  SPDX-License-Identifier: BSD-3-Clause
  *
- *  Benchmarks the uDepot I/O layer in two modes:
- *    --mbuff: zero-copy via io_pread_mbuff_append() into Mbuff segments
- *    --copy:  non-zero-copy via io_pread_mbuff_append() + copy_to_buffer()
+ *  Benchmarks the uDepot I/O layer in two modes, mirroring udepot-test.cc:
  *
- *  Both paths perform I/O through the Mbuff API (matching udepot-test.cc).
- *  The only difference is the extra copy_to_buffer() in the non-zero-copy
- *  path, mirroring the KV store's internal copy from its IO Mbuff to the
- *  user's raw buffer in the non-mbuff get() interface.
+ *    --mbuff (zero-copy, like get_test_thin_mbuff):
+ *      User provides an Mbuff.  Data is read directly into the Mbuff's
+ *      IO buffer via pread_native.  No intermediate copy.
+ *
+ *    --copy (non-zero-copy, like get_test_thin):
+ *      Mirrors the raw-buffer KV::get() path (udepot-lsa.cc:475):
+ *      internally reads into an Mbuff via pread_native, then copies
+ *      from the Mbuff to a separate application buffer via
+ *      copy_to_buffer.  Both paths go through the same Mbuff I/O
+ *      machinery; the copy path adds an extra data copy.
  *
  *  Supports --aio (default) and --uring backends.
  *  Output format matches trt_aio_bench / trt_uring_bench for the
@@ -36,7 +40,6 @@
 
 #include "uDepot/mbuff.hh"
 #include "uDepot/io.hh"
-#include "uDepot/io/helpers.hh"
 #include "uDepot/io/trt-aio.hh"
 #include "uDepot/io/trt-uring.hh"
 
@@ -104,9 +107,10 @@ make_tempfile(char *tmpname, size_t file_size, size_t buff_size) {
     return fd;
 }
 
-// Zero-copy path: read directly into the user's Mbuff.
-// Mirrors get_test_thin_mbuff in udepot-test.cc — the KV store reads
-// directly into the user-provided Mbuff, no intermediate copy.
+// Zero-copy path (like get_test_thin_mbuff in udepot-test.cc):
+// User provides an Mbuff.  Data is read directly into the Mbuff's
+// IO buffer.  No intermediate copy.
+// Data flow: disk -> Mbuff buffer (done).
 CoroTask t_io_mbuff(void *arg__) {
     struct io_slot *slot = (struct io_slot *)arg__;
     struct targ *arg = slot->targ;
@@ -115,23 +119,28 @@ CoroTask t_io_mbuff(void *arg__) {
 
     slot->mb->reslice(0);
 
-    ssize_t ret = (ssize_t)(co_await udepot::io_pread_mbuff_append(
-        *arg->io, *slot->mb, arg->buff_size, (off_t)(chunk * arg->buff_size)));
+    IO::Ptr ptr(slot->io_buf, arg->buff_size);
+    ssize_t ret = (ssize_t)(co_await arg->io->pread_native(
+        std::move(ptr), arg->buff_size, (off_t)(chunk * arg->buff_size)));
     if (ret < 0) {
-        fprintf(stderr, "io_pread_mbuff_append err=%zd\n", ret);
+        fprintf(stderr, "pread_native err=%zd\n", ret);
         exit(1);
     }
     assert(ret == (ssize_t)arg->buff_size);
+
+    slot->mb->append_uninitialized(arg->buff_size);
 
     arg->slot_stack[arg->slot_top++] = slot->idx;
     arg->io_completed++;
     co_return 0;
 }
 
-// Non-zero-copy path: read into an internal Mbuff, then copy out to the
-// user's raw buffer.
-// Mirrors get_test_thin in udepot-test.cc — the KV store reads into its
-// own internal Mbuff, then copies the value into the caller's char* buffer.
+// Non-zero-copy path (like get_test_thin / KV::get(raw) in udepot-lsa.cc):
+// Internally uses an Mbuff (same as zero-copy path), then copies the
+// data out to a separate application buffer — mirroring how the
+// raw-buffer KV::get() wraps the Mbuff-based get() and calls
+// copy_to_buffer afterwards.
+// Data flow: disk -> Mbuff buffer -> copy_to_buffer -> dst_buf.
 CoroTask t_io_copy(void *arg__) {
     struct io_slot *slot = (struct io_slot *)arg__;
     struct targ *arg = slot->targ;
@@ -140,15 +149,18 @@ CoroTask t_io_copy(void *arg__) {
 
     slot->mb->reslice(0);
 
-    ssize_t ret = (ssize_t)(co_await udepot::io_pread_mbuff_append(
-        *arg->io, *slot->mb, arg->buff_size, (off_t)(chunk * arg->buff_size)));
+    IO::Ptr ptr(slot->io_buf, arg->buff_size);
+    ssize_t ret = (ssize_t)(co_await arg->io->pread_native(
+        std::move(ptr), arg->buff_size, (off_t)(chunk * arg->buff_size)));
     if (ret < 0) {
-        fprintf(stderr, "io_pread_mbuff_append err=%zd\n", ret);
+        fprintf(stderr, "pread_native err=%zd\n", ret);
         exit(1);
     }
     assert(ret == (ssize_t)arg->buff_size);
 
+    slot->mb->append_uninitialized(arg->buff_size);
     slot->mb->copy_to_buffer(0, slot->dst_buf, arg->buff_size);
+    asm volatile("" : : "r"(slot->dst_buf) : "memory");
 
     arg->slot_stack[arg->slot_top++] = slot->idx;
     arg->io_completed++;
@@ -329,7 +341,6 @@ int main(int argc, char *argv[])
             perror("posix_memalign"); exit(1);
         }
 
-        // Both paths use Mbuff for I/O (matching udepot-test.cc pattern)
         auto *mb = new udepot::Mbuff(std::type_index(typeid(IO::Ptr)));
         IO::Ptr ioptr(arg.slots[i].io_buf, BUFF_SIZE);
         mb->add_iobuff(ioptr, BUFF_SIZE);
