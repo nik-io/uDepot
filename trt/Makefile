@@ -13,6 +13,19 @@ INCLUDES  = -Isrc
 
 CC       ?= gcc
 CXX      ?= g++
+
+# Use ccache when it is available. This matters most when switching build
+# flags: the config stamp below forces a full rebuild on a flag change, so
+# flipping BUILD_SPDK on and off would otherwise recompile everything each
+# time. ccache turns the flip back to a previously built configuration into
+# cache hits. Set NO_CCACHE=1 to opt out.
+ifndef NO_CCACHE
+  CCACHE := $(shell command -v ccache 2>/dev/null)
+  ifneq ($(CCACHE),)
+    CXX := $(CCACHE) $(CXX)
+  endif
+endif
+
 LD       ?= ld
 
 # common for C/C++

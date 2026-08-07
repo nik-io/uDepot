@@ -18,7 +18,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libboost-dev zlib1g-dev libaio-dev
+            build-essential libboost-dev zlib1g-dev libaio-dev ccache
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-build-${{ github.sha }}
+          restore-keys: ccache-build-
 
       - name: Build (default flags, non-SPDK)
         run: make -j"$(nproc)"
@@ -48,10 +55,14 @@ jobs:
       # interfaces alternate over one store, so the drift that makes absolute
       # numbers useless on a shared runner cancels out of each pair. Runs on
       # every backend -- an invariant that holds on only one is not one.
-      # timeout-minutes so a stalled backend fails fast instead of burning the
-      # job limit -- io_uring on shared runners is the likely candidate.
+      # This is the long job, and legitimately so: the PUT phase has to become
+      # I/O bound before the comparison means anything, which is why PERF_OPS
+      # cannot simply be lowered. Measured at PERF_OPS=150000 PERF_ITERS=3, a
+      # single backend takes >15 min on a 4-core box, so both backends on a
+      # shared runner is comfortably over half an hour. The timeout is a
+      # backstop against a genuine hang, not a target.
       - name: Zero-copy invariant (AIO and io_uring)
-        timeout-minutes: 25
+        timeout-minutes: 60
         run: make -j"$(nproc)" BUILD_URING=1 run_perf_test
 
       - name: Python bindings build test
@@ -75,9 +86,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libboost-dev zlib1g-dev libaio-dev \
+            build-essential libboost-dev zlib1g-dev libaio-dev ccache \
             nasm libnuma-dev uuid-dev libssl-dev python3-pyelftools
           python3 -m pip install --quiet meson ninja
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-spdk-${{ github.sha }}
+          restore-keys: ccache-spdk-
 
       - name: Build SPDK
         run: |

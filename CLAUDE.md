@@ -71,7 +71,13 @@ over one store and fails if the zero-copy path is not ahead. Alternating is
 what makes it valid: drift affects both sides of a pair equally and cancels.
 
 Tuning: `-n` (ops per phase), `-i` (paired iterations); the Makefile exposes
-`PERF_OPS` and `PERF_ITERS`.
+`PERF_OPS` (default 150000) and `PERF_ITERS` (default 3).
+
+Expect this to be slow. The PUT phase has to become I/O bound before the
+comparison means anything, so the op count cannot just be lowered to make CI
+quick: at 150k ops and 3 iterations a single backend takes over 15 minutes on a
+4-core machine. Both backends on a shared runner is over half an hour. That is
+the cost of the invariant, not a bug.
 
 Only ever assert on the *same* operation done two ways — zero-copy against
 copying. Comparing different operations to each other (GET against PUT) asserts
@@ -103,6 +109,24 @@ Notes:
   constraint.
 
 ## Build
+
+Objects depend on a stamp holding the build flags (`BUILD_SPDK`, `BUILD_URING`,
+...), so changing flags forces a rebuild rather than silently reusing objects
+compiled under different ones. That is necessary — `BUILD_SPDK` decides whether
+whole template instantiations exist — but it means a flag flip is a full
+rebuild.
+
+**Install ccache.** The Makefiles pick it up automatically when present, and it
+turns the flip back to a previously built configuration into cache hits.
+Measured here:
+
+| | time |
+|---|---|
+| flip to `BUILD_SPDK=1` (cold cache) | 156s |
+| flip back to non-SPDK (warm) | 1s |
+| flip to `BUILD_SPDK=1` again (warm) | 2s |
+
+`NO_CCACHE=1` opts out.
 
 ```bash
 # Default (non-SPDK)

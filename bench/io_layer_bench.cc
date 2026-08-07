@@ -34,11 +34,13 @@
  *  the device sector size. The default is 512; a 32-byte grain makes those
  *  writes 64 bytes and every O_DIRECT backend rejects them with EINVAL.
  *
- *  NOTE on -n: keep it at the default (200k) or higher when comparing the
+ *  NOTE on -n: keep it at 150k or higher when comparing the
  *  two modes. Below roughly 100k ops the store never fills enough for the
  *  PUT phase to become I/O bound, and the zero-copy difference sits inside
  *  run-to-run noise -- at 100k the PUT comparison inverts at random, while
- *  at 200k zero-copy wins every paired run. Compare paired runs (alternate
+ *  at 200k zero-copy wins every paired run. 150k is the CI default: it is
+ *  above the range where the comparison was seen to invert, but it has not
+ *  been characterised as thoroughly as 200k. Compare paired runs (alternate
  *  the two modes) rather than medians of separate batches: throughput
  *  drifts steadily across a batch, which biases unpaired medians.
  */
