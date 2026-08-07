@@ -108,11 +108,35 @@ ifeq (1, $(BUILD_URING))
 	LIBS += -Ltrt/external/liburing/src -luring
 endif
 
+# Use ccache when it is available. This matters most when switching build
+# flags: the config stamp below forces a full rebuild on a flag change, so
+# flipping BUILD_SPDK on and off would otherwise recompile everything each
+# time. ccache turns the flip back to a previously built configuration into
+# cache hits. Set NO_CCACHE=1 to opt out.
+ifndef NO_CCACHE
+  CCACHE := $(shell command -v ccache 2>/dev/null)
+  ifneq ($(CCACHE),)
+    CXX := $(CCACHE) $(CXX)
+  endif
+endif
+
 SPDK_DIR   = $(TRT_DIR)/external/spdk
 SPDK_INC   = -I$(SPDK_DIR)/include -I$(SPDK_DIR)/dpdk/build/include
-SPDK_LIBS  = $(SPDK_DIR)/build/lib/libspdk_nvme.a     \
-             $(SPDK_DIR)/build/lib/libspdk_util.a     \
+# SPDK registers its NVMe transports (PCIe, TCP, RDMA) and its socket
+# implementations from static constructors in objects nothing references, so a
+# plain static link drops them and the transport shows up as "not available"
+# at runtime. SPDK's own apps whole-archive these for the same reason.
+SPDK_MODULE_LIBS = $(SPDK_DIR)/build/lib/libspdk_nvme.a       \
+                   $(SPDK_DIR)/build/lib/libspdk_sock_posix.a
+
+# Whole-archived once only: repeating it (as the plain libs are, below, to
+# resolve their circular static deps) would multiply-define every symbol.
+SPDK_WHOLE = -Wl,--whole-archive $(SPDK_MODULE_LIBS) -Wl,--no-whole-archive
+
+SPDK_LIBS  = $(SPDK_DIR)/build/lib/libspdk_util.a     \
              $(SPDK_DIR)/build/lib/libspdk_log.a      \
+             $(SPDK_DIR)/build/lib/libspdk_trace.a    \
+             $(SPDK_DIR)/build/lib/libspdk_thread.a   \
              $(SPDK_DIR)/build/lib/libspdk_env_dpdk.a \
              $(SPDK_DIR)/build/lib/libspdk_sock.a     \
              $(SPDK_DIR)/build/lib/libspdk_json.a     \
@@ -124,6 +148,7 @@ SPDK_LIBS  = $(SPDK_DIR)/build/lib/libspdk_nvme.a     \
              -Wl,-rpath=$(SPDK_DIR)/dpdk/build/lib \
              -lrte_eal -lrte_mempool -lrte_ring -lrte_telemetry \
              -lrte_pci -lrte_bus_pci \
+             $(SPDK_DIR)/isa-l/.libs/libisal.a \
              -lssl -lcrypto \
              -ldl -lrt -lnuma -luuid
 
@@ -152,6 +177,7 @@ LIBPYUDEPOT = python/pyudepot/libpyudepot.so
 ifeq (1, $(BUILD_SPDK))
       CXXFLAGS  += -DUDEPOT_TRT_SPDK
       CXXFLAGS  += $(SPDK_INC)
+      LIBS      += $(SPDK_WHOLE)
       LIBS      += $(SPDK_LIBS)
       LIBS      += $(SPDK_LIBS)
       # DPDK and SPDK is not build with -fPIC, required by JNI. Dont build JNI
@@ -409,7 +435,93 @@ endif
 udepot-memcache-test: $(MC_SERVER) $(MC_TEST)
 	@$(call do_run_test, test/uDepot/memcache/unit-test.sh bin/udepot-memcache-server test/uDepot/memcache/udepot-memcache-test)
 
+# Performance tests.
+#
+# No baselines and no base-revision builds: throughput on cloud containers
+# drifts more than any regression worth catching. The check that survives that
+# is an invariant measured inside one run -- io_layer_bench --compare runs the
+# raw-buffer and Mbuff interfaces alternately over one store and fails if the
+# zero-copy path is not ahead. CI runs these on every push.
+.PHONY: run_perf_test run_pyudepot_build_test
+
+# Zero-copy invariant: the Mbuff KV interface must not be slower than raw
+# buffers. Covers every backend the benchmark supports -- an invariant that
+# only holds on one of them is not an invariant.
+#
+# Needs >=200k ops, or the PUT phase never becomes I/O bound. The default
+# grain size is sector-aligned so the O_DIRECT backends can issue their
+# segment metadata writes.
+# Overridable so CI can trade resolution for wall-clock. Keep PERF_OPS well
+# above 100000: below roughly that the PUT phase never becomes I/O bound and
+# the comparison inverts at random.
+PERF_OPS   ?= 150000
+PERF_ITERS ?= 3
+
+run_perf_test: bench/io_layer_bench
+	@rm -f /tmp/io-layer-bench.udepot
+	@$(call do_run_test, bench/io_layer_bench --compare --aio -n $(PERF_OPS) -i $(PERF_ITERS))
+	@$(call do_run_test, bench/io_layer_bench --compare --uring -n $(PERF_OPS) -i $(PERF_ITERS))
+	@rm -f /tmp/io-layer-bench.udepot
+
+# Python bindings: a build test. It builds libpyudepot.so, imports it, and
+# round-trips a key/value through the real library.
+#
+# There is deliberately no perf assertion here. The only performance property
+# worth asserting is the zero-copy one, and that is a comparison of the same
+# operation with and without zero copy -- not a comparison across different
+# operations. Absolute latency bounds, or "GET must beat PUT", say more about
+# the machine than about the code.
+run_pyudepot_build_test: $(LIBPYUDEPOT) python/build-test.py
+	@$(call do_run_test, PYTHONPATH=python/ python3 python/build-test.py)
+
+# Block-device sizing test.
+#
+# uDepot only grows the backing object when --size exceeds what is already
+# there, and on a file that growth is an ftruncate. A block device cannot be
+# truncated, so the whole-device path (no --size, or 0) must not attempt one.
+# This got broken once by a benchmark passing an explicit size, so it is
+# pinned here against a real loop device rather than left to documentation.
+#
+# Everything runs in one shell with a trap, so the loop device is detached and
+# the backing file removed even when a step fails.
+.PHONY: run_blkdev_test
+run_blkdev_test: bin/udepot-test
+	@set -e; \
+	if ! command -v losetup >/dev/null 2>&1; then \
+		echo "SKIP blkdev test: losetup not available"; exit 0; \
+	fi; \
+	IMG=$$(mktemp /tmp/udepot-blkdev-XXXXXX.img); \
+	LOOP=""; \
+	cleanup() { \
+		[ -n "$$LOOP" ] && losetup -d "$$LOOP" >/dev/null 2>&1 || true; \
+		rm -f "$$IMG"; \
+	}; \
+	trap cleanup EXIT; \
+	truncate -s 1200M "$$IMG"; \
+	if ! LOOP=$$(losetup -f --show "$$IMG" 2>/dev/null); then \
+		echo "SKIP blkdev test: cannot attach a loop device (needs privileges)"; \
+		exit 0; \
+	fi; \
+	echo "using block device $$LOOP"; \
+	BEFORE=$$(blockdev --getsize64 "$$LOOP"); \
+	echo -n "RUNNING TEST: whole device, no --size ... "; \
+	bin/udepot-test -f "$$LOOP" -w 2000 -r 2000 -t 1 --thin --force-destroy \
+		--grain-size 4096 --val-size 3072 >/dev/null 2>&1 \
+		&& echo "SUCCESS." || { echo "FAILED."; exit 1; }; \
+	AFTER=$$(blockdev --getsize64 "$$LOOP"); \
+	echo -n "RUNNING TEST: device size unchanged ... "; \
+	[ "$$BEFORE" = "$$AFTER" ] && echo "SUCCESS." \
+		|| { echo "FAILED ($$BEFORE -> $$AFTER)."; exit 1; }; \
+	echo -n "RUNNING TEST: oversized --size is rejected, not truncated ... "; \
+	if bin/udepot-test -f "$$LOOP" --size 99999999999 -w 10 -r 10 -t 1 --thin \
+		--force-destroy --grain-size 4096 >/dev/null 2>&1; then \
+		echo "FAILED (expected failure on a device that cannot grow)."; exit 1; \
+	else \
+		echo "SUCCESS."; \
+	fi
+
 run_tests: $(TESTS)
+	make run_blkdev_test
 	rm -f /dev/shm/udepot-test
 	@$(call do_run_test,bin/udepot-test -f /dev/shm/udepot-test -w 1000 -r 1000 --size $$(((1048576+4096)*1024+1)) -t 1 --force-destroy --grain-size 32 --val-size 3072)
 	@$(call do_run_test,bin/udepot-test -f /dev/shm/udepot-test -w 1000 -r 1000 -t 1 --del --grain-size 32 --val-size 3072)
@@ -434,10 +546,27 @@ run_pyudepot_test: python/test-pyudepot.py $(LIBPYUDEPOT)
 run_pyudepot_backend_test: python/test-pyudepot-backends.py $(LIBPYUDEPOT)
 	@$(call do_run_test, LD_LIBRARY_PATH=python/pyudepot/:$$LD_LIBRARY_PATH PYTHONPATH=python/:$$PYTHONPATH python3 python/test-pyudepot-backends.py)
 
-%.o: %.cc Makefile
+# Objects compiled under different feature flags are not interchangeable:
+# BUILD_SPDK changes -DUDEPOT_TRT_SPDK, which decides whether the SPDK template
+# instantiations and code paths exist at all. Reusing objects across a flag
+# change produces undefined references, or worse, a binary silently missing the
+# feature. Make every object depend on a stamp holding the current flag set, so
+# changing flags rebuilds rather than reusing.
+BUILD_CONFIG_SIG  := SPDK=$(BUILD_SPDK) URING=$(BUILD_URING) TYPE=$(BUILD_TYPE) PIC=$(BUILD_PIC) SDT=$(BUILD_SDT)
+BUILD_CONFIG_FILE := .build-config
+
+.PHONY: build-config-check
+build-config-check:
+	@if [ "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" != "$(BUILD_CONFIG_SIG)" ]; then 		echo "build flags changed -> $(BUILD_CONFIG_SIG)"; 		printf '%s' "$(BUILD_CONFIG_SIG)" > $(BUILD_CONFIG_FILE); 	fi
+
+$(BUILD_CONFIG_FILE): build-config-check
+	@:
+
+%.o: %.cc Makefile $(BUILD_CONFIG_FILE)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 lclean:
+	rm  -f $(BUILD_CONFIG_FILE)
 	rm  -f $(TESTS) test/jni/uDepotJNITest.class
 	rm  -f $(udepot_OBJ)
 	rm  -f $(udepot_test_OBJ)

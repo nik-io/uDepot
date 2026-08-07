@@ -174,7 +174,69 @@ $ bin/udepot-test -f /dev/nvme0n1 -w 15000000 -r 15000000 -t 3 --thin --force-de
 
 Unit tests can be found in `test/uDepot/udepot-utests.cc`.
 
-JNI test in `test/jni/uDepotJNITest.java`.
+### Using a block device (or an SPDK namespace)
+
+uDepot sizes the store from `--size`, and only grows the backing object when
+the requested size exceeds what is already there. On a **regular file** that
+growth is an `ftruncate`. A **block device or an SPDK namespace cannot be
+truncated**, so pass either no `--size` at all or `--size 0` and uDepot will
+use the whole device:
+
+```
+# whole device, no truncation attempted
+$ sudo bin/udepot-test -f /dev/nvme0n1 -w 1000000 -r 1000000 -t 4 \
+      --thin --force-destroy --grain-size 4096 --val-size 3072
+
+# a file instead: --size is required, since the file starts empty
+$ bin/udepot-test -f /tmp/udepot-store --size $(((1048576+4096)*1024+1)) \
+      -w 100000 -r 100000 -t 1 --thin --force-destroy --grain-size 512
+```
+
+Passing a `--size` larger than the device makes uDepot attempt the truncate and
+fail with `ftruncate failed with 95` (`EOPNOTSUPP`).
+
+Note the grain size: with an O_DIRECT backend (`-u 3`, `-u 5`, `-u 6`) every
+write must be a multiple of the device sector size, and uDepot sizes its
+segment metadata writes in grains. A grain smaller than the sector size makes
+those writes fail with `EINVAL`. Use `--grain-size 512` or `4096`; the small
+32-byte-grain examples in this repo all run against `/dev/shm`, which is
+buffered and has no such constraint.
+
+### Testing the SPDK backend without NVMe hardware
+
+**The TRT SPDK backend is currently untested on hardware-less machines.** See
+[docs/TODO-spdk-testing.md](docs/TODO-spdk-testing.md) for the blocker, the
+evidence gathered so far, and a reproduction.
+
+What runs today is a build and environment smoke test:
+
+```
+$ make -C trt BUILD_SPDK=1 run_spdk_bdev_test   # unit
+$ make -C trt BUILD_SPDK=1 run_spdk_bdev_perf   # perf, reported not asserted
+```
+
+Both reserve hugepages and give them back afterwards, including on failure.
+Be clear about their scope: `trt/src/tests/spdk_bdev_test.cc` includes only
+SPDK headers and runs under `spdk_app_start`, SPDK's own event framework. It
+never touches `trt::SPDK`, `SpdkQpair`, or the TRT scheduler. It confirms SPDK
+builds and links and that the bdev API works — not that uDepot's SPDK path
+does.
+
+Testing the backend itself needs an NVMe namespace, because uDepot's SPDK
+backend is the raw NVMe driver rather than the bdev layer. A malloc bdev can
+only reach it exported over NVMe-oF, which is the route the TODO covers.
+
+**Device size must not be an exact multiple of the segment size.** uDepot puts
+its device metadata in the tail left over after `align_down(device_size,
+segment_size * grain_size)`. A device whose size divides exactly leaves no
+tail, and init fails with:
+
+```
+check_dev_size() Not enough spare capacity for device ... physical_size:536870912 logical_size:536870912
+```
+
+This is why the size in the file-backed examples ends in `+1`, and why the
+malloc bdev above is 513MiB rather than 512MiB.
 
 ## Notes
 

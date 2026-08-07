@@ -27,6 +27,8 @@
  */
 
 
+#include <string>
+
 namespace udepot {
 
 // simple wrapper over trt::SPDK (at least for now)
@@ -35,6 +37,16 @@ class TrtSpdkIO final : public uDepotIO_, public RteAlloc<512> {
 	static SpdkQpair *getThreadQP();
 
 public:
+	// Register an NVMe-over-Fabrics target to probe in addition to any local
+	// PCIe NVMe devices. Must be called before global_init(). This is what
+	// lets SPDK be exercised on a machine with no NVMe hardware, by pointing
+	// at a loopback nvmf target.
+	enum class NvmefTransport { TCP, RDMA };
+	static void add_nvmef_target(NvmefTransport transport,
+	                             const std::string &traddr,
+	                             const std::string &trsvcid,
+	                             const std::string &subnqn);
+
 	static void global_init();
 	static void thread_init();
 	static void thread_exit();
