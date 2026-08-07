@@ -152,6 +152,17 @@ SPDK_LIBS  = $(SPDK_DIR)/build/lib/libspdk_util.a     \
              -lssl -lcrypto \
              -ldl -lrt -lnuma -luuid
 
+# Both library targets strip debug symbols, which is right for a release
+# artifact but leaves a crash backtrace with nothing under the outermost
+# exported symbol: a segfault inside the library reports `uDepotPut ()` and
+# nothing beneath it, which is not enough to act on. NO_STRIP=1 keeps the
+# symbols so a debugger can name the frames that matter.
+ifdef NO_STRIP
+STRIP_DEBUG := @true # NO_STRIP set, keeping debug symbols
+else
+STRIP_DEBUG := strip --strip-debug
+endif
+
 LIBCITYHASH_LIB       := $(LIBCITYHASH_DIR)/src/.libs/libcityhash.a
 LIBUSALSA_OBJ         := $(SALSA_DIR)/src/frontends/usalsa++/build/libusalsa++.o
 
@@ -330,7 +341,7 @@ udepot_all_DEP = $(patsubst %.cc, .deps/%.d, ${udepot_all_SRC})
 
 $(LIBUDEPOT): $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) $(LIBCITYHASH_LIB)
 	gcc-ar cr $@ $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ)
-	strip --strip-debug $@
+	$(STRIP_DEBUG) $@
 
 bin/udepot-test:  $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) $(udepot_OBJ) $(udepot_test_OBJ) $(LIBCITYHASH_LIB) Makefile
 	@mkdir -p $(dir $@)
@@ -368,7 +379,7 @@ test/misc/inline_cache: test/misc/inline_cache.cc
 
 $(LIBPYUDEPOT): $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) $(LIBCITYHASH_LIB) python/wrapper/pyudepot.o python/wrapper/pyudepot.hh
 	$(CXX) -shared -Wl,-soname,$@ $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) python/wrapper/pyudepot.o $(LIBS) -o $@
-	strip --strip-debug $@
+	$(STRIP_DEBUG) $@
 
 #
 # uDepot JNI
