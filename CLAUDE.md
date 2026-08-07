@@ -4,6 +4,11 @@
 
 1. **Never ignore user instructions.** Every instruction the user gives must be addressed — either acted on or explicitly acknowledged with a reason if it cannot be done.
 2. **Never gaslight the user.** Do not claim something was done when it was not, do not fabricate results, and do not dismiss or reframe a user's concern as already handled when it has not been.
+3. **Fix repeating problems at the root.** When you hit a bug or build
+   problem for the second time, do not just work around it again — change
+   something so it cannot recur: a test that catches it, a default that makes
+   it impossible, a check in the build, or a documented rule. A fix that only
+   repairs the current instance is not finished.
 
 ## Project Overview
 

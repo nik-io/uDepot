@@ -218,7 +218,7 @@ $ sudo mkdir -p /dev/hugepages && sudo mount -t hugetlbfs nodev /dev/hugepages
 $ sudo trt/external/spdk/build/bin/nvmf_tgt -m 0x3 -s 1024 &
 $ R=trt/external/spdk/scripts/rpc.py
 $ sudo $R nvmf_create_transport -t TCP
-$ sudo $R bdev_malloc_create 256 512 -b Malloc0
+$ sudo $R bdev_malloc_create 513 512 -b Malloc0   # note: NOT a round 512
 $ sudo $R nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001
 $ sudo $R nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Malloc0
 $ sudo $R nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 \
@@ -237,6 +237,18 @@ $ sudo sh -c 'echo 0 > /proc/sys/vm/nr_hugepages'
 The namespace is memory-backed, so it disappears with the target -- nothing to
 clean up on disk. Remember step 4: hugepages stay reserved (and unavailable to
 everything else) until released.
+
+**Device size must not be an exact multiple of the segment size.** uDepot puts
+its device metadata in the tail left over after `align_down(device_size,
+segment_size * grain_size)`. A device whose size divides exactly leaves no
+tail, and init fails with:
+
+```
+check_dev_size() Not enough spare capacity for device ... physical_size:536870912 logical_size:536870912
+```
+
+This is why the size in the file-backed examples ends in `+1`, and why the
+malloc bdev above is 513MiB rather than 512MiB.
 
 JNI test in `test/jni/uDepotJNITest.java`.
 

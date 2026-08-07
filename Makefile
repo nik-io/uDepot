@@ -451,7 +451,54 @@ run_pyudepot_perf_test: $(LIBPYUDEPOT)
 	@PERF_PYUDEPOT=1 python3 -m pytest bench/test_pyudepot_perf.py -q
 	@rm -f /tmp/pyudepot-bench.udepot
 
+# Block-device sizing test.
+#
+# uDepot only grows the backing object when --size exceeds what is already
+# there, and on a file that growth is an ftruncate. A block device cannot be
+# truncated, so the whole-device path (no --size, or 0) must not attempt one.
+# This got broken once by a benchmark passing an explicit size, so it is
+# pinned here against a real loop device rather than left to documentation.
+#
+# Everything runs in one shell with a trap, so the loop device is detached and
+# the backing file removed even when a step fails.
+.PHONY: run_blkdev_test
+run_blkdev_test: bin/udepot-test
+	@set -e; \
+	if ! command -v losetup >/dev/null 2>&1; then \
+		echo "SKIP blkdev test: losetup not available"; exit 0; \
+	fi; \
+	IMG=$$(mktemp /tmp/udepot-blkdev-XXXXXX.img); \
+	LOOP=""; \
+	cleanup() { \
+		[ -n "$$LOOP" ] && losetup -d "$$LOOP" >/dev/null 2>&1 || true; \
+		rm -f "$$IMG"; \
+	}; \
+	trap cleanup EXIT; \
+	truncate -s 1200M "$$IMG"; \
+	if ! LOOP=$$(losetup -f --show "$$IMG" 2>/dev/null); then \
+		echo "SKIP blkdev test: cannot attach a loop device (needs privileges)"; \
+		exit 0; \
+	fi; \
+	echo "using block device $$LOOP"; \
+	BEFORE=$$(blockdev --getsize64 "$$LOOP"); \
+	echo -n "RUNNING TEST: whole device, no --size ... "; \
+	bin/udepot-test -f "$$LOOP" -w 2000 -r 2000 -t 1 --thin --force-destroy \
+		--grain-size 4096 --val-size 3072 >/dev/null 2>&1 \
+		&& echo "SUCCESS." || { echo "FAILED."; exit 1; }; \
+	AFTER=$$(blockdev --getsize64 "$$LOOP"); \
+	echo -n "RUNNING TEST: device size unchanged ... "; \
+	[ "$$BEFORE" = "$$AFTER" ] && echo "SUCCESS." \
+		|| { echo "FAILED ($$BEFORE -> $$AFTER)."; exit 1; }; \
+	echo -n "RUNNING TEST: oversized --size is rejected, not truncated ... "; \
+	if bin/udepot-test -f "$$LOOP" --size 99999999999 -w 10 -r 10 -t 1 --thin \
+		--force-destroy --grain-size 4096 >/dev/null 2>&1; then \
+		echo "FAILED (expected failure on a device that cannot grow)."; exit 1; \
+	else \
+		echo "SUCCESS."; \
+	fi
+
 run_tests: $(TESTS)
+	make run_blkdev_test
 	rm -f /dev/shm/udepot-test
 	@$(call do_run_test,bin/udepot-test -f /dev/shm/udepot-test -w 1000 -r 1000 --size $$(((1048576+4096)*1024+1)) -t 1 --force-destroy --grain-size 32 --val-size 3072)
 	@$(call do_run_test,bin/udepot-test -f /dev/shm/udepot-test -w 1000 -r 1000 -t 1 --del --grain-size 32 --val-size 3072)
@@ -476,10 +523,27 @@ run_pyudepot_test: python/test-pyudepot.py $(LIBPYUDEPOT)
 run_pyudepot_backend_test: python/test-pyudepot-backends.py $(LIBPYUDEPOT)
 	@$(call do_run_test, LD_LIBRARY_PATH=python/pyudepot/:$$LD_LIBRARY_PATH PYTHONPATH=python/:$$PYTHONPATH python3 python/test-pyudepot-backends.py)
 
-%.o: %.cc Makefile
+# Objects compiled under different feature flags are not interchangeable:
+# BUILD_SPDK changes -DUDEPOT_TRT_SPDK, which decides whether the SPDK template
+# instantiations and code paths exist at all. Reusing objects across a flag
+# change produces undefined references, or worse, a binary silently missing the
+# feature. Make every object depend on a stamp holding the current flag set, so
+# changing flags rebuilds rather than reusing.
+BUILD_CONFIG_SIG  := SPDK=$(BUILD_SPDK) URING=$(BUILD_URING) TYPE=$(BUILD_TYPE) PIC=$(BUILD_PIC) SDT=$(BUILD_SDT)
+BUILD_CONFIG_FILE := .build-config
+
+.PHONY: build-config-check
+build-config-check:
+	@if [ "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" != "$(BUILD_CONFIG_SIG)" ]; then 		echo "build flags changed -> $(BUILD_CONFIG_SIG)"; 		printf '%s' "$(BUILD_CONFIG_SIG)" > $(BUILD_CONFIG_FILE); 	fi
+
+$(BUILD_CONFIG_FILE): build-config-check
+	@:
+
+%.o: %.cc Makefile $(BUILD_CONFIG_FILE)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 lclean:
+	rm  -f $(BUILD_CONFIG_FILE)
 	rm  -f $(TESTS) test/jni/uDepotJNITest.class
 	rm  -f $(udepot_OBJ)
 	rm  -f $(udepot_test_OBJ)
