@@ -85,9 +85,10 @@ jobs:
       - name: Build uDepot with SPDK
         run: make -j"$(nproc)" BUILD_SPDK=1 BUILD_URING=1
 
-      # Memory-backed bdev, so no NVMe hardware is needed. The targets reserve
-      # hugepages and give them back afterwards, including on failure.
-      - name: SPDK bdev unit test
+      # Build and environment smoke test only: these use SPDK's own event
+      # framework and never touch trt::SPDK or SpdkQpair, so they do not cover
+      # the TRT SPDK backend. See docs/TODO-spdk-testing.md.
+      - name: SPDK bdev smoke test
         run: sudo -E make -C trt BUILD_SPDK=1 run_spdk_bdev_test
 
       - name: SPDK bdev perf (report only)
