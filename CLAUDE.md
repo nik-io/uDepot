@@ -63,14 +63,21 @@ push.
 | layer | test | language |
 |---|---|---|
 | uDepot KV interfaces | `make run_perf_test` | C++ (`bench/io_layer_bench --compare`) |
-| pyudepot bindings | `make run_pyudepot_perf_test` | python |
+| pyudepot bindings | `make run_pyudepot_build_test` | python (build test, no perf assertion) |
 | raw I/O backends | `make -C trt run_perf_test` | C++ (report only, no assertion) |
 
 `io_layer_bench --compare` runs the raw-buffer and Mbuff interfaces alternately
 over one store and fails if the zero-copy path is not ahead. Alternating is
 what makes it valid: drift affects both sides of a pair equally and cancels.
 
-Tuning: `-n` (ops per phase), `-i` (paired iterations).
+Tuning: `-n` (ops per phase), `-i` (paired iterations); the Makefile exposes
+`PERF_OPS` and `PERF_ITERS`.
+
+Only ever assert on the *same* operation done two ways — zero-copy against
+copying. Comparing different operations to each other (GET against PUT) asserts
+something about the backend, the page cache and the device rather than about
+the code, and flips with the environment. That is why the Python bindings get a
+build test rather than a perf assertion.
 
 The invariant is checked on every backend the benchmark supports (AIO and
 io_uring). An invariant that only holds on one backend is not an invariant.

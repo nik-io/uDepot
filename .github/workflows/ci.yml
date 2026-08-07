@@ -48,11 +48,14 @@ jobs:
       # interfaces alternate over one store, so the drift that makes absolute
       # numbers useless on a shared runner cancels out of each pair. Runs on
       # every backend -- an invariant that holds on only one is not one.
+      # timeout-minutes so a stalled backend fails fast instead of burning the
+      # job limit -- io_uring on shared runners is the likely candidate.
       - name: Zero-copy invariant (AIO and io_uring)
+        timeout-minutes: 25
         run: make -j"$(nproc)" BUILD_URING=1 run_perf_test
 
-      - name: Python bindings
-        run: make -j"$(nproc)" BUILD_URING=1 run_pyudepot_perf_test
+      - name: Python bindings build test
+        run: make -j"$(nproc)" BUILD_URING=1 run_pyudepot_build_test
 
       # Reported, not asserted: raw I/O throughput on a shared runner is not
       # stable enough to gate on, but the numbers are useful in the log.
