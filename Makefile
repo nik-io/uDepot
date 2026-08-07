@@ -272,6 +272,30 @@ endif
 $(LIBTRT_OBJ): build_trt
 	@true # dummy recipe, so that Makefile cannot be smart and deduce that $(LIBTRT_OBJ) cannot change (as it does with an empty recipe)
 
+# liburing generates src/include/liburing/compat.h during its configure step,
+# so it is absent in a fresh checkout. uDepot sources that include liburing.h
+# -- src/uDepot/io/trt-uring.cc -- are built by the generic %.o pattern rule,
+# which had no dependency on that step: only $(LIBTRT_OBJ) waited for
+# build_trt. Under make -j on a clean tree those objects could therefore be
+# compiled before the header existed, failing with
+#   liburing.h:19:10: fatal error: liburing/compat.h: No such file or directory
+# The race is invisible once a previous build has generated the header, which
+# is why it showed up on CI rather than on a developer machine. An order-only
+# prerequisite fixes the ordering without making every object rebuild when
+# the header's timestamp changes.
+ifeq (1,$(BUILD_URING))
+LIBURING_COMPAT_H := $(TRT_DIR)/external/liburing/src/include/liburing/compat.h
+URING_ORDER_DEP   := | $(LIBURING_COMPAT_H)
+
+# Routed through build_trt rather than invoking build_uring directly: both this
+# and $(LIBTRT_OBJ) need liburing configured, and build_trt is phony so make
+# runs it exactly once per invocation. Invoking build_uring from here as well
+# let two liburing builds run concurrently under -j, and the second clobbered
+# the first's configure output.
+$(LIBURING_COMPAT_H): build_trt
+	@true # dummy recipe, for the same reason as $(LIBTRT_OBJ) above
+endif
+
 udepot_OBJ = $(patsubst %.cc, %.o, ${udepot_SRC})
 
 udepot_test_SRC = test/uDepot/udepot-test.cc
@@ -391,7 +415,7 @@ test/jni/uDepotJNITest.class: $(uDepotJNI_CLASSFILE) $(JNI_TEST_DIR)/uDepotJNITe
 	@echo DEPS: $<
 	@set -e; $(CXX) $(CXXFLAGS) $(JNI_CXXFLAGS) -MM -MP $< > $@
 
-$(JNI_DIR)/%.o: $(JNI_DIR)/%.cc $(uDepotJNI_C_HEADER) Makefile
+$(JNI_DIR)/%.o: $(JNI_DIR)/%.cc $(uDepotJNI_C_HEADER) Makefile $(URING_ORDER_DEP)
 	$(CXX) $(CXXFLAGS) $(JNI_CXXFLAGS) -c $< -o $@
 
 $(JNI_DIR)/libuDepotJNI.so: $(JNI_OBJ) $(LIBCITYHASH_LIB) Makefile
@@ -562,7 +586,7 @@ build-config-check:
 $(BUILD_CONFIG_FILE): build-config-check
 	@:
 
-%.o: %.cc Makefile $(BUILD_CONFIG_FILE)
+%.o: %.cc Makefile $(BUILD_CONFIG_FILE) $(URING_ORDER_DEP)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 lclean:
