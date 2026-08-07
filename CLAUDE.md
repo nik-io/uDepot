@@ -67,13 +67,19 @@ what makes it valid: drift affects both sides of a pair equally and cancels.
 
 Tuning: `-n` (ops per phase), `-i` (paired iterations).
 
+The invariant is checked on every backend the benchmark supports (AIO and
+io_uring). An invariant that only holds on one backend is not an invariant.
+
 Notes:
 - Keep `-n` at 200000 or higher. Below roughly 100k ops the PUT phase never
   becomes I/O bound and the comparison inverts at random.
-- The io_uring backend currently aborts under any KV workload:
-  `persist_seg_md()` issues a 64-byte O_DIRECT `pwritev` that fails EINVAL on
-  alignment. Reproduces with plain `bin/udepot-test -u 6`, so it predates the
-  perf work and is not fixed here.
+- **Grain size must be at least the device sector size on O_DIRECT backends.**
+  uDepot sizes its segment metadata writes in grains, so a 32-byte grain makes
+  those writes 64 bytes, which `pwritev` rejects with EINVAL under O_DIRECT.
+  The benchmark defaults to 512 (overridable with `--grain-size`), matching
+  what the Makefile's own TRT tests use. The 32-byte-grain tests in this
+  Makefile all run against `/dev/shm`, which is buffered and has no such
+  constraint.
 
 ## Build
 

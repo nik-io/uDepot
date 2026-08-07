@@ -46,8 +46,9 @@ jobs:
 
       # The zero-copy invariant is measured inside a single run: the two KV
       # interfaces alternate over one store, so the drift that makes absolute
-      # numbers useless on a shared runner cancels out of each pair.
-      - name: Zero-copy invariant
+      # numbers useless on a shared runner cancels out of each pair. Runs on
+      # every backend -- an invariant that holds on only one is not one.
+      - name: Zero-copy invariant (AIO and io_uring)
         run: make -j"$(nproc)" BUILD_URING=1 run_perf_test
 
       - name: Python bindings

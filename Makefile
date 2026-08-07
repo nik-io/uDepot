@@ -419,9 +419,15 @@ udepot-memcache-test: $(MC_SERVER) $(MC_TEST)
 .PHONY: run_perf_test run_pyudepot_perf_test
 
 # Zero-copy invariant: the Mbuff KV interface must not be slower than raw
-# buffers. Needs >=200k ops, or the PUT phase never becomes I/O bound.
+# buffers. Covers every backend the benchmark supports -- an invariant that
+# only holds on one of them is not an invariant.
+#
+# Needs >=200k ops, or the PUT phase never becomes I/O bound. The default
+# grain size is sector-aligned so the O_DIRECT backends can issue their
+# segment metadata writes.
 run_perf_test: bench/io_layer_bench
 	@$(call do_run_test, bench/io_layer_bench --compare --aio -n 200000 -i 5)
+	@$(call do_run_test, bench/io_layer_bench --compare --uring -n 200000 -i 5)
 
 # Python bindings get a Python suite, since the bindings are what it tests.
 run_pyudepot_perf_test: $(LIBPYUDEPOT)

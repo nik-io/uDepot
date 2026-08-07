@@ -29,6 +29,11 @@
  *
  *  Backends: --aio (RuntimeTrt, default) and --uring (RuntimeTrtUring).
  *
+ *  NOTE on --grain-size: O_DIRECT requires sector-aligned I/O, and uDepot
+ *  sizes its segment metadata writes in grains, so the grain must be at least
+ *  the device sector size. The default is 512; a 32-byte grain makes those
+ *  writes 64 bytes and every O_DIRECT backend rejects them with EINVAL.
+ *
  *  NOTE on -n: keep it at the default (200k) or higher when comparing the
  *  two modes. Below roughly 100k ops the store never fills enough for the
  *  PUT phase to become I/O bound, and the zero-copy difference sits inside
@@ -74,6 +79,14 @@ struct bench_conf {
     u64    nops         = 200000;
     size_t ntasks       = 128;
     size_t iterations   = 5;
+    // O_DIRECT requires sector-aligned I/O, and uDepot sizes its
+    // segment metadata writes in grains. A 32-byte grain makes those
+    // writes 64 bytes, which EINVALs on any O_DIRECT backend -- so the
+    // grain must be at least the device sector size. 512 is the
+    // smallest that holds on both 512e and 4Kn devices here, and is
+    // what the Makefile's own TRT tests use.
+    u64    grain_size   = 512;
+    u64    segment_size = 4096;  // in grains
 };
 
 static bench_conf bconf_g;
@@ -469,9 +482,13 @@ static void usage(const char *prog)
         "  -n NOPS        operations per phase (default: %lu)\n"
         "  --val-size N   value size in bytes (default: %u)\n"
         "  --trt-ntasks N tasks per scheduler (default: %zu)\n"
-        "  -i N           paired iterations for --compare (default: %zu)\n",
+        "  -i N           paired iterations for --compare (default: %zu)\n"
+        "  --grain-size N grain size in bytes (default: %lu; must be >= the\n"
+        "                 device sector size for O_DIRECT backends)\n"
+        "  --segment-size N segment size in grains (default: %lu)\n",
         prog, (unsigned long)bconf_g.nops, bconf_g.val_size, bconf_g.ntasks,
-        bconf_g.iterations);
+        bconf_g.iterations, (unsigned long)bconf_g.grain_size,
+        (unsigned long)bconf_g.segment_size);
     exit(1);
 }
 
@@ -504,6 +521,10 @@ int main(int argc, char *argv[])
             bconf_g.ntasks = std::stoul(argv[++i]);
         } else if (a == "-i" && i + 1 < argc) {
             bconf_g.iterations = std::stoul(argv[++i]);
+        } else if (a == "--grain-size" && i + 1 < argc) {
+            bconf_g.grain_size = std::stoul(argv[++i]);
+        } else if (a == "--segment-size" && i + 1 < argc) {
+            bconf_g.segment_size = std::stoul(argv[++i]);
         } else {
             usage(argv[0]);
         }
@@ -516,9 +537,9 @@ int main(int argc, char *argv[])
 
     KV_conf conf(fname,
                  (1048576UL + 4096UL) * 1024UL + 1UL, /* size */
-                 true,   /* force destroy */
-                 32,     /* grain size */
-                 4096    /* segment size */);
+                 true,                  /* force destroy */
+                 bconf_g.grain_size,    /* grain size, bytes */
+                 bconf_g.segment_size   /* segment size, grains */);
     conf.type_m = use_uring ? KV_conf::KV_UDEPOT_SALSA_TRT_URING
                             : KV_conf::KV_UDEPOT_SALSA_TRT_AIO;
     conf.thread_nr_m = 1;
