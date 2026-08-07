@@ -47,6 +47,40 @@ Follow the [Google C++ Style Guide](https://google.github.io/styleguide/cppguide
 - Non-SPDK tests must always pass: `make clean && make` with default flags
 - Do not merge code that breaks the non-SPDK build
 
+### Performance tests
+
+Perf tests live with the layer they measure. Raw I/O belongs in `trt`, the KV
+interfaces and Python bindings belong here, and anything tensor-shaped belongs
+in flywheel:
+
+| layer | location |
+|---|---|
+| raw I/O backends (AIO, io_uring, SPDK) | `trt/bench/test_trt_io_perf.py` |
+| uDepot KV interfaces, pyudepot bindings | `bench/test_udepot_perf.py` |
+
+Shared machinery is in `trt/bench/perflib.py` — trt is the lowest layer, so
+both suites (and flywheel) import from it without inverting the dependency.
+
+Nothing is compared against a recorded baseline: throughput on cloud
+containers drifts more than any regression worth catching. Every comparison
+runs both sides alternately in one batch and reports the per-pair delta, which
+cancels shared drift. Opt-in:
+
+```bash
+# Current revision vs the change's base revision, in a worktree
+PERF_AB=1 python -m pytest trt/bench/test_trt_io_perf.py bench/test_udepot_perf.py -q
+
+# Zero-copy invariant + Python binding overhead bound
+PERF_ZEROCOPY=1 python -m pytest bench/test_udepot_perf.py -q
+```
+
+Tuning: `PERF_ITERATIONS` (default 5), `PERF_THRESHOLD` (default 0.10),
+`PERF_BASE_REF`, `UDEPOT_ROOT`.
+
+Note: `io_layer_bench` needs `-n 200000` or higher for the zero-copy
+comparison to be meaningful; below roughly 100k ops the PUT phase never
+becomes I/O bound and the result inverts at random.
+
 ## Build
 
 ```bash

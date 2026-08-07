@@ -19,7 +19,14 @@ from numpy.ctypeslib import ndpointer
 if platform.system() == 'Windows':
     raise OSError(22, 'Unsupported OS', 'windows')
 else:
-    libudepot = cdll.LoadLibrary("libpyudepot.so")
+    # Prefer the library shipped alongside this module, so importing pyudepot
+    # works from a build tree without LD_LIBRARY_PATH being set before the
+    # interpreter starts (which a test harness cannot do for itself). Fall
+    # back to the loader search path for installed layouts.
+    _lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'libpyudepot.so')
+    libudepot = cdll.LoadLibrary(
+        _lib_path if os.path.exists(_lib_path) else 'libpyudepot.so')
 
 pyopen = libudepot.uDepotOpen
 pyopen_backend = libudepot.uDepotOpenWithBackend
