@@ -49,37 +49,44 @@ Follow the [Google C++ Style Guide](https://google.github.io/styleguide/cppguide
 
 ### Performance tests
 
-Perf tests live with the layer they measure. Raw I/O belongs in `trt`, the KV
-interfaces and Python bindings belong here, and anything tensor-shaped belongs
-in flywheel:
+Perf tests live with the layer they measure, and are written in that layer's
+language. The C++ layers get shell drivers over the benchmark binaries; only
+the Python bindings get a Python suite, because the bindings are what it
+tests:
 
-| layer | location |
-|---|---|
-| raw I/O backends (AIO, io_uring, SPDK) | `trt/bench/test_trt_io_perf.py` |
-| uDepot KV interfaces, pyudepot bindings | `bench/test_udepot_perf.py` |
+| layer | location | language |
+|---|---|---|
+| raw I/O backends (AIO, io_uring, SPDK) | `trt/bench/perf_test.sh` | shell |
+| uDepot KV interfaces | `bench/perf_test.sh` | shell |
+| pyudepot bindings | `bench/test_pyudepot_perf.py` | python |
 
-Shared machinery is in `trt/bench/perflib.py` — trt is the lowest layer, so
-both suites (and flywheel) import from it without inverting the dependency.
+Shared machinery is in `trt/bench/perflib.sh` — trt is the lowest layer, so
+uDepot sources it without inverting the dependency direction.
 
 Nothing is compared against a recorded baseline: throughput on cloud
 containers drifts more than any regression worth catching. Every comparison
 runs both sides alternately in one batch and reports the per-pair delta, which
-cancels shared drift. Opt-in:
+cancels shared drift.
 
 ```bash
-# Current revision vs the change's base revision, in a worktree
-PERF_AB=1 python -m pytest trt/bench/test_trt_io_perf.py bench/test_udepot_perf.py -q
-
-# Zero-copy invariant + Python binding overhead bound
-PERF_ZEROCOPY=1 python -m pytest bench/test_udepot_perf.py -q
+make -C trt run_perf_test      # raw I/O, A/B vs the base revision
+make run_perf_test             # KV zero-copy invariant + A/B
+make run_perf_zerocopy         # just the invariant (no base build)
+make run_pyudepot_perf_test    # python bindings
 ```
 
 Tuning: `PERF_ITERATIONS` (default 5), `PERF_THRESHOLD` (default 0.10),
-`PERF_BASE_REF`, `UDEPOT_ROOT`.
+`PERF_OPS`, `PERF_RUN_TIMEOUT`, `PERF_BASE_REF`, `UDEPOT_ROOT`.
 
-Note: `io_layer_bench` needs `-n 200000` or higher for the zero-copy
-comparison to be meaningful; below roughly 100k ops the PUT phase never
-becomes I/O bound and the result inverts at random.
+Notes:
+- `io_layer_bench` needs `-n 200000` or higher for the zero-copy comparison to
+  be meaningful; below roughly 100k ops the PUT phase never becomes I/O bound
+  and the result inverts at random.
+- The io_uring backend currently aborts under any KV workload —
+  `persist_seg_md()` issues a 64-byte O_DIRECT `pwritev` that fails EINVAL on
+  alignment. Reproduces with plain `bin/udepot-test -u 6`, so it predates the
+  perf work. The perf scripts probe each backend first and report this
+  explicitly rather than letting it look like sample noise.
 
 ## Build
 

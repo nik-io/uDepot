@@ -409,6 +409,25 @@ endif
 udepot-memcache-test: $(MC_SERVER) $(MC_TEST)
 	@$(call do_run_test, test/uDepot/memcache/unit-test.sh bin/udepot-memcache-server test/uDepot/memcache/udepot-memcache-test)
 
+# Performance regression tests.
+#
+# Paired comparisons, never against a recorded baseline -- see
+# trt/bench/perflib.sh for why. Both are slow, so they are separate targets
+# rather than part of run_tests.
+.PHONY: run_perf_test run_perf_zerocopy run_pyudepot_perf_test
+
+# Zero-copy invariant + A/B against the change's base revision.
+run_perf_test: bench/io_layer_bench
+	@bench/perf_test.sh
+
+# Just the zero-copy invariant (no base-revision build).
+run_perf_zerocopy: bench/io_layer_bench
+	@bench/perf_test.sh zerocopy
+
+# Python bindings: their own suite, because the thing under test is Python.
+run_pyudepot_perf_test: $(LIBPYUDEPOT)
+	@PERF_PYUDEPOT=1 python3 -m pytest bench/test_pyudepot_perf.py -q
+
 run_tests: $(TESTS)
 	rm -f /dev/shm/udepot-test
 	@$(call do_run_test,bin/udepot-test -f /dev/shm/udepot-test -w 1000 -r 1000 --size $$(((1048576+4096)*1024+1)) -t 1 --force-destroy --grain-size 32 --val-size 3072)

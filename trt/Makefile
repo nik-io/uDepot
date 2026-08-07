@@ -1,4 +1,4 @@
-.PHONY: all clean builddirs
+.PHONY: all clean builddirs run_perf_test
 
 BUILD_SPDK   ?= 0
 BUILD_RDMA   ?= 0
@@ -378,3 +378,8 @@ clean:
 	cd external/liburing && make clean && cd -
 
 
+
+# Raw I/O performance regression test (kernel AIO, io_uring, SPDK bdev).
+# Paired A/B against the change's base revision; see bench/perflib.sh.
+run_perf_test:
+	@bench/perf_test.sh
