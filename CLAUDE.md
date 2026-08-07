@@ -10,6 +10,22 @@
    it impossible, a check in the build, or a documented rule. A fix that only
    repairs the current instance is not finished.
 
+## Commit Attribution
+
+Commits are **authored by nik-io <nicioan@gmail.com>** and **co-authored by
+Claude**. Claude is a co-author, not the author.
+
+`.claude/settings.json` sets `GIT_AUTHOR_*` and `GIT_COMMITTER_*` for this, and
+is checked in so it survives a fresh checkout or container. If it ever fails to
+apply, set it explicitly rather than committing as Claude:
+
+```bash
+git config user.name  "nik-io"
+git config user.email "nicioan@gmail.com"
+```
+
+Keep the `Co-Authored-By: Claude ...` trailer on Claude-assisted commits.
+
 ## Project Overview
 
 uDepot is a high-performance key-value store for NVMe storage, built on a coroutine-based task runtime (TRT). It supports multiple I/O backends (POSIX, O_DIRECT, SPDK, io_uring) and NVMe over Fabrics (TCP/RDMA). Reference paper: https://www.usenix.org/system/files/fast19-kourtis.pdf
