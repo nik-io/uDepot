@@ -6,7 +6,12 @@
  *
  *  Benchmarks the uDepot I/O layer in two modes:
  *    --mbuff: zero-copy via io_pread_mbuff_append() into Mbuff segments
- *    --copy:  non-zero-copy via pread_native() + memcpy to destination
+ *    --copy:  non-zero-copy via io_pread_mbuff_append() + copy_to_buffer()
+ *
+ *  Both paths perform I/O through the Mbuff API (matching udepot-test.cc).
+ *  The only difference is the extra copy_to_buffer() in the non-zero-copy
+ *  path, mirroring the KV store's internal copy from its IO Mbuff to the
+ *  user's raw buffer in the non-mbuff get() interface.
  *
  *  Supports --aio (default) and --uring backends.
  *  Output format matches trt_aio_bench / trt_uring_bench for the
@@ -99,6 +104,9 @@ make_tempfile(char *tmpname, size_t file_size, size_t buff_size) {
     return fd;
 }
 
+// Zero-copy path: read directly into the user's Mbuff.
+// Mirrors get_test_thin_mbuff in udepot-test.cc — the KV store reads
+// directly into the user-provided Mbuff, no intermediate copy.
 CoroTask t_io_mbuff(void *arg__) {
     struct io_slot *slot = (struct io_slot *)arg__;
     struct targ *arg = slot->targ;
@@ -120,22 +128,27 @@ CoroTask t_io_mbuff(void *arg__) {
     co_return 0;
 }
 
+// Non-zero-copy path: read into an internal Mbuff, then copy out to the
+// user's raw buffer.
+// Mirrors get_test_thin in udepot-test.cc — the KV store reads into its
+// own internal Mbuff, then copies the value into the caller's char* buffer.
 CoroTask t_io_copy(void *arg__) {
     struct io_slot *slot = (struct io_slot *)arg__;
     struct targ *arg = slot->targ;
     const size_t nchunks = arg->file_size / arg->buff_size;
     size_t chunk = rand() % nchunks;
 
-    IO::Ptr ptr(slot->io_buf, arg->buff_size);
-    ssize_t ret = (ssize_t)(co_await arg->io->pread_native(
-        std::move(ptr), arg->buff_size, (off_t)(chunk * arg->buff_size)));
+    slot->mb->reslice(0);
+
+    ssize_t ret = (ssize_t)(co_await udepot::io_pread_mbuff_append(
+        *arg->io, *slot->mb, arg->buff_size, (off_t)(chunk * arg->buff_size)));
     if (ret < 0) {
-        fprintf(stderr, "pread_native err=%zd\n", ret);
+        fprintf(stderr, "io_pread_mbuff_append err=%zd\n", ret);
         exit(1);
     }
     assert(ret == (ssize_t)arg->buff_size);
 
-    memcpy(slot->dst_buf, slot->io_buf, arg->buff_size);
+    slot->mb->copy_to_buffer(0, slot->dst_buf, arg->buff_size);
 
     arg->slot_stack[arg->slot_top++] = slot->idx;
     arg->io_completed++;
@@ -316,12 +329,13 @@ int main(int argc, char *argv[])
             perror("posix_memalign"); exit(1);
         }
 
-        if (mode == Mode::MBUFF) {
-            auto *mb = new udepot::Mbuff(std::type_index(typeid(IO::Ptr)));
-            IO::Ptr ioptr(arg.slots[i].io_buf, BUFF_SIZE);
-            mb->add_iobuff(ioptr, BUFF_SIZE);
-            arg.slots[i].mb = mb;
-        } else {
+        // Both paths use Mbuff for I/O (matching udepot-test.cc pattern)
+        auto *mb = new udepot::Mbuff(std::type_index(typeid(IO::Ptr)));
+        IO::Ptr ioptr(arg.slots[i].io_buf, BUFF_SIZE);
+        mb->add_iobuff(ioptr, BUFF_SIZE);
+        arg.slots[i].mb = mb;
+
+        if (mode == Mode::COPY) {
             arg.slots[i].dst_buf = (char *)malloc(BUFF_SIZE);
             if (!arg.slots[i].dst_buf) { perror("malloc"); exit(1); }
         }
@@ -339,13 +353,11 @@ int main(int argc, char *argv[])
     c.wait_for_all();
 
     for (uint32_t i = 0; i < NOPS_BATCH; i++) {
-        if (mode == Mode::MBUFF) {
-            arg.slots[i].mb->reset(
-                [](void *) { /* io_buf freed below */ });
-            delete arg.slots[i].mb;
-        } else {
+        arg.slots[i].mb->reset(
+            [](void *) { /* io_buf freed below */ });
+        delete arg.slots[i].mb;
+        if (mode == Mode::COPY)
             free(arg.slots[i].dst_buf);
-        }
         free(arg.slots[i].io_buf);
     }
     delete[] arg.slots;
