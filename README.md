@@ -174,6 +174,70 @@ $ bin/udepot-test -f /dev/nvme0n1 -w 15000000 -r 15000000 -t 3 --thin --force-de
 
 Unit tests can be found in `test/uDepot/udepot-utests.cc`.
 
+### Using a block device (or an SPDK namespace)
+
+uDepot sizes the store from `--size`, and only grows the backing object when
+the requested size exceeds what is already there. On a **regular file** that
+growth is an `ftruncate`. A **block device or an SPDK namespace cannot be
+truncated**, so pass either no `--size` at all or `--size 0` and uDepot will
+use the whole device:
+
+```
+# whole device, no truncation attempted
+$ sudo bin/udepot-test -f /dev/nvme0n1 -w 1000000 -r 1000000 -t 4 \
+      --thin --force-destroy --grain-size 4096 --val-size 3072
+
+# a file instead: --size is required, since the file starts empty
+$ bin/udepot-test -f /tmp/udepot-store --size $(((1048576+4096)*1024+1)) \
+      -w 100000 -r 100000 -t 1 --thin --force-destroy --grain-size 512
+```
+
+Passing a `--size` larger than the device makes uDepot attempt the truncate and
+fail with `ftruncate failed with 95` (`EOPNOTSUPP`).
+
+Note the grain size: with an O_DIRECT backend (`-u 3`, `-u 5`, `-u 6`) every
+write must be a multiple of the device sector size, and uDepot sizes its
+segment metadata writes in grains. A grain smaller than the sector size makes
+those writes fail with `EINVAL`. Use `--grain-size 512` or `4096`; the small
+32-byte-grain examples in this repo all run against `/dev/shm`, which is
+buffered and has no such constraint.
+
+### Running the SPDK backend without NVMe hardware
+
+The SPDK backends (`-u 7`, `-u 8`) normally bind a local PCIe NVMe device. To
+exercise them on a machine that has none -- a laptop, a container, CI -- export
+a memory-backed namespace from SPDK's own NVMe-oF target and point uDepot at it
+over TCP loopback:
+
+```
+# 1. hugepages (SPDK/DPDK requirement)
+$ sudo sh -c 'echo 1536 > /proc/sys/vm/nr_hugepages'
+$ sudo mkdir -p /dev/hugepages && sudo mount -t hugetlbfs nodev /dev/hugepages
+
+# 2. start the soft target and export a 256MiB malloc-backed namespace
+$ sudo trt/external/spdk/build/bin/nvmf_tgt -m 0x3 -s 1024 &
+$ R=trt/external/spdk/scripts/rpc.py
+$ sudo $R nvmf_create_transport -t TCP
+$ sudo $R bdev_malloc_create 256 512 -b Malloc0
+$ sudo $R nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001
+$ sudo $R nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Malloc0
+$ sudo $R nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 \
+      -t tcp -a 127.0.0.1 -s 4420
+
+# 3. point the benchmark at it
+$ sudo bench/io_layer_bench --compare --spdk \
+      --nvmef 127.0.0.1:4420:nqn.2016-06.io.spdk:cnode1 -n 2000
+
+# 4. tear down: stop the target and release the hugepages
+$ sudo pkill nvmf_tgt
+$ sudo umount /dev/hugepages
+$ sudo sh -c 'echo 0 > /proc/sys/vm/nr_hugepages'
+```
+
+The namespace is memory-backed, so it disappears with the target -- nothing to
+clean up on disk. Remember step 4: hugepages stay reserved (and unavailable to
+everything else) until released.
+
 JNI test in `test/jni/uDepotJNITest.java`.
 
 ## Notes

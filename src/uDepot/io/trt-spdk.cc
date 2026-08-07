@@ -21,6 +21,19 @@ static thread_local bool                       SpdkThreadInitialized__ = false;
 static thread_local std::shared_ptr<SpdkQpair> SpdkThreadQP__;
 
 
+void TrtSpdkIO::add_nvmef_target(NvmefTransport transport,
+                                 const std::string &traddr,
+                                 const std::string &trsvcid,
+                                 const std::string &subnqn) {
+	NvmefTarget t;
+	t.transport = (transport == NvmefTransport::RDMA) ? NvmefTarget::RDMA
+	                                                  : NvmefTarget::TCP;
+	t.traddr  = traddr;
+	t.trsvcid = trsvcid;
+	t.subnqn  = subnqn;
+	SpdkGlobalState__.add_nvmef_target(std::move(t));
+}
+
 void TrtSpdkIO::global_init(void) {
 	SpdkGlobalState__.init();
 }

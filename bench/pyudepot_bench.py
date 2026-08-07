@@ -85,32 +85,35 @@ def main() -> int:
     print(f"f:{args.file} backend:{backend_name} ops:{args.ops} "
           f"val_size:{args.val_size}", flush=True)
 
-    kv = pyudepot.uDepot(
-        file_name=args.file, size=args.size,
-        backend=args.backend, force_destroy=True,
-    )
+    # Always remove the store, including on the error paths -- a failed run
+    # should not leave a multi-hundred-MB file behind.
+    try:
+        kv = pyudepot.uDepot(
+            file_name=args.file, size=args.size,
+            backend=args.backend, force_destroy=True,
+        )
 
-    keys = _keys(args.ops)
-    val = np.arange(args.val_size, dtype=np.uint8)
+        keys = _keys(args.ops)
+        val = np.arange(args.val_size, dtype=np.uint8)
 
-    start = time.monotonic()
-    for i in range(args.ops):
-        if not kv.put(keys[i], val):
-            print(f"put failed at {i}", file=sys.stderr)
-            return 1
-    report("PUT", time.monotonic() - start, args.ops, args.val_size)
+        start = time.monotonic()
+        for i in range(args.ops):
+            if not kv.put(keys[i], val):
+                print(f"put failed at {i}", file=sys.stderr)
+                return 1
+        report("PUT", time.monotonic() - start, args.ops, args.val_size)
 
-    out = np.zeros(args.val_size, dtype=np.uint8)
-    start = time.monotonic()
-    for i in range(args.ops):
-        if not kv.get(keys[i], out):
-            print(f"get failed at {i}", file=sys.stderr)
-            return 1
-    report("GET", time.monotonic() - start, args.ops, args.val_size)
-
-    if os.path.exists(args.file):
-        os.unlink(args.file)
-    return 0
+        out = np.zeros(args.val_size, dtype=np.uint8)
+        start = time.monotonic()
+        for i in range(args.ops):
+            if not kv.get(keys[i], out):
+                print(f"get failed at {i}", file=sys.stderr)
+                return 1
+        report("GET", time.monotonic() - start, args.ops, args.val_size)
+        return 0
+    finally:
+        if os.path.exists(args.file):
+            os.unlink(args.file)
 
 
 if __name__ == "__main__":

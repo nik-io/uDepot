@@ -61,6 +61,10 @@
 #include "uDepot/kv-factory.hh"
 #include "uDepot/mbuff.hh"
 #include "uDepot/udepot-lsa.hh"
+#if defined(UDEPOT_TRT_SPDK)
+#include <rte_lcore.h>
+#include "uDepot/io/trt-spdk.hh"
+#endif
 
 #include "trt/uapi/trt.hh"
 #include "trt_util/arg_pool.hh"
@@ -468,6 +472,44 @@ static int run_trt(KV_conf *conf, bool compare)
     return compare_failed_g ? 1 : 0;
 }
 
+#if defined(UDEPOT_TRT_SPDK)
+// SPDK runs on DPDK lcores rather than plain pthreads, so it needs an
+// RteController and a worker lcore -- mirroring udepot-test's SPDK path.
+template<typename RT>
+static int run_trt_spdk(KV_conf *conf, bool compare)
+{
+    main_arg arg;
+    arg.kv   = nullptr;
+    arg.conf = conf;
+
+    RT::IO::global_init();
+
+    trt::RteController c;
+    const unsigned lcores_nr = rte_lcore_count();
+    if (lcores_nr < 2) {
+        fprintf(stderr,
+                "SPDK needs at least 2 lcores (got %u): widen the DPDK core "
+                "mask, e.g. -c 0x3\n", lcores_nr);
+        return 1;
+    }
+
+    unsigned lcore;
+    bool spawned = false;
+    RTE_LCORE_FOREACH_WORKER(lcore) {
+        c.spawn_scheduler(compare ? t_main_compare<RT> : t_main<RT>,
+                          &arg, trt::TaskType::TASK, lcore);
+        spawned = true;
+        break;  // single scheduler: the comparison is single-threaded
+    }
+    if (!spawned) {
+        fprintf(stderr, "no worker lcore available for SPDK\n");
+        return 1;
+    }
+    c.wait_for_all();
+    return compare_failed_g ? 1 : 0;
+}
+#endif
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -478,6 +520,9 @@ static void usage(const char *prog)
         "  --copy         non-zero-copy raw buffer KV interface (get/put_test_thin)\n"
         "  --aio          TRT AIO backend (default)\n"
         "  --uring        TRT io_uring backend\n"
+        "  --spdk         TRT SPDK backend (needs BUILD_SPDK=1)\n"
+        "  --nvmef A:P:NQN  probe an NVMe-oF target instead of local\n"
+        "                 PCIe NVMe, so SPDK can run without hardware\n"
         "  -f FILE        KV store file (default: /tmp/io-layer-bench.udepot)\n"
         "  -n NOPS        operations per phase (default: %lu)\n"
         "  --val-size N   value size in bytes (default: %u)\n"
@@ -496,8 +541,10 @@ int main(int argc, char *argv[])
 {
     bool mode_set = false;
     bool compare = false;
-    bool use_uring = false;
+    enum { BE_AIO, BE_URING, BE_SPDK } backend = BE_AIO;
+    std::string nvmef;  // traddr:trsvcid:subnqn
     std::string fname = "/tmp/io-layer-bench.udepot";
+    bool fname_set = false;
 
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -508,11 +555,16 @@ int main(int argc, char *argv[])
         } else if (a == "--compare") {
             compare = true; mode_set = true;
         } else if (a == "--aio") {
-            use_uring = false;
+            backend = BE_AIO;
         } else if (a == "--uring") {
-            use_uring = true;
+            backend = BE_URING;
+        } else if (a == "--spdk") {
+            backend = BE_SPDK;
+        } else if (a == "--nvmef" && i + 1 < argc) {
+            nvmef = argv[++i];
         } else if (a == "-f" && i + 1 < argc) {
             fname = argv[++i];
+            fname_set = true;
         } else if (a == "-n" && i + 1 < argc) {
             bconf_g.nops = std::stoul(argv[++i]);
         } else if (a == "--val-size" && i + 1 < argc) {
@@ -533,28 +585,66 @@ int main(int argc, char *argv[])
     if (!mode_set)
         usage(argv[0]);
 
-    unlink(fname.c_str());
+    // SPDK addresses a namespace, not a path: there is no file to unlink and
+    // nothing to ftruncate, so the store takes the device's own size. An empty
+    // name selects the first namespace found (local PCIe or fabrics).
+    const bool spdk_dev = (backend == BE_SPDK);
+    if (spdk_dev) {
+        if (!fname_set)
+            fname.clear();
+    } else {
+        unlink(fname.c_str());
+    }
 
     KV_conf conf(fname,
-                 (1048576UL + 4096UL) * 1024UL + 1UL, /* size */
+                 spdk_dev ? 0 : (1048576UL + 4096UL) * 1024UL + 1UL, /* size */
                  true,                  /* force destroy */
                  bconf_g.grain_size,    /* grain size, bytes */
                  bconf_g.segment_size   /* segment size, grains */);
-    conf.type_m = use_uring ? KV_conf::KV_UDEPOT_SALSA_TRT_URING
-                            : KV_conf::KV_UDEPOT_SALSA_TRT_AIO;
+    conf.type_m = (backend == BE_URING) ? KV_conf::KV_UDEPOT_SALSA_TRT_URING
+                                       : KV_conf::KV_UDEPOT_SALSA_TRT_AIO;
     conf.thread_nr_m = 1;
     conf.validate_and_sanitize_parameters();
 
     printf("f:%s mode:%s backend:%s nops:%lu val_size:%u\n",
            fname.c_str(),
            compare ? "compare" : (bconf_g.mode == Mode::MBUFF ? "mbuff" : "copy"),
-           use_uring ? "uring" : "aio",
+           backend == BE_SPDK ? "spdk" : (backend == BE_URING ? "uring" : "aio"),
            (unsigned long)bconf_g.nops, bconf_g.val_size);
     fflush(stdout);
 
-    int err = use_uring ? run_trt<RuntimeTrtUring>(&conf, compare)
-                        : run_trt<RuntimeTrt>(&conf, compare);
+    int err;
+    if (backend == BE_SPDK) {
+#if defined(UDEPOT_TRT_SPDK)
+        // SPDK has no pathname: an empty device string takes the first
+        // namespace found, whether local PCIe or an nvmf target.
+        conf.type_m = KV_conf::KV_UDEPOT_SALSA_TRT_SPDK;
+        if (!nvmef.empty()) {
+            const size_t c1 = nvmef.find(':');
+            const size_t c2 = nvmef.find(':', c1 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos) {
+                fprintf(stderr,
+                        "--nvmef expects traddr:trsvcid:subnqn (got '%s')\n",
+                        nvmef.c_str());
+                return 1;
+            }
+            TrtSpdkIO::add_nvmef_target(TrtSpdkIO::NvmefTransport::TCP,
+                                        nvmef.substr(0, c1),
+                                        nvmef.substr(c1 + 1, c2 - c1 - 1),
+                                        nvmef.substr(c2 + 1));
+        }
+        err = run_trt_spdk<RuntimeTrtSpdk>(&conf, compare);
+#else
+        fprintf(stderr, "--spdk requires a BUILD_SPDK=1 build\n");
+        return 77;  // distinct status: not built, as opposed to failed
+#endif
+    } else if (backend == BE_URING) {
+        err = run_trt<RuntimeTrtUring>(&conf, compare);
+    } else {
+        err = run_trt<RuntimeTrt>(&conf, compare);
+    }
 
-    unlink(fname.c_str());
+    if (!spdk_dev)
+        unlink(fname.c_str());
     return err;
 }

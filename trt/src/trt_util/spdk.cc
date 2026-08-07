@@ -194,9 +194,20 @@ int SpdkGlobalState::register_controllers(void) {
     }
 
     printf("Initializing NVMe controllers\n");
-    if (spdk_nvme_probe(NULL /* local PCIe */, this, probe_cb, attach_cb, NULL) != 0) {
-        fprintf(stderr, "spdk_nvme_probe() failed\n");
-        return 1;
+    // A failing local PCIe probe is not fatal when NVMe-oF targets are
+    // configured: a host with no local NVMe (or without VFIO/UIO bound) still
+    // has to be able to reach a fabrics target. Only the absence of *any*
+    // namespace after probing everything is an error.
+    const bool pcie_ok =
+        spdk_nvme_probe(NULL /* local PCIe */, this, probe_cb, attach_cb, NULL) == 0;
+    if (!pcie_ok) {
+        if (sg_nvmef_targets.empty()) {
+            fprintf(stderr, "spdk_nvme_probe() failed\n");
+            return 1;
+        }
+        fprintf(stderr,
+                "local PCIe probe found nothing; continuing with %zu NVMeoF target(s)\n",
+                sg_nvmef_targets.size());
     }
 
     for (const auto &target : sg_nvmef_targets) {
@@ -205,6 +216,11 @@ int SpdkGlobalState::register_controllers(void) {
             fprintf(stderr, "Failed to connect to NVMeoF target %s:%s\n",
                     target.traddr.c_str(), target.trsvcid.c_str());
         }
+    }
+
+    if (sg_namespaces.empty()) {
+        fprintf(stderr, "No NVMe namespaces found (local or fabrics)\n");
+        return 1;
     }
 
     return 0;

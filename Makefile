@@ -110,9 +110,21 @@ endif
 
 SPDK_DIR   = $(TRT_DIR)/external/spdk
 SPDK_INC   = -I$(SPDK_DIR)/include -I$(SPDK_DIR)/dpdk/build/include
-SPDK_LIBS  = $(SPDK_DIR)/build/lib/libspdk_nvme.a     \
-             $(SPDK_DIR)/build/lib/libspdk_util.a     \
+# SPDK registers its NVMe transports (PCIe, TCP, RDMA) and its socket
+# implementations from static constructors in objects nothing references, so a
+# plain static link drops them and the transport shows up as "not available"
+# at runtime. SPDK's own apps whole-archive these for the same reason.
+SPDK_MODULE_LIBS = $(SPDK_DIR)/build/lib/libspdk_nvme.a       \
+                   $(SPDK_DIR)/build/lib/libspdk_sock_posix.a
+
+# Whole-archived once only: repeating it (as the plain libs are, below, to
+# resolve their circular static deps) would multiply-define every symbol.
+SPDK_WHOLE = -Wl,--whole-archive $(SPDK_MODULE_LIBS) -Wl,--no-whole-archive
+
+SPDK_LIBS  = $(SPDK_DIR)/build/lib/libspdk_util.a     \
              $(SPDK_DIR)/build/lib/libspdk_log.a      \
+             $(SPDK_DIR)/build/lib/libspdk_trace.a    \
+             $(SPDK_DIR)/build/lib/libspdk_thread.a   \
              $(SPDK_DIR)/build/lib/libspdk_env_dpdk.a \
              $(SPDK_DIR)/build/lib/libspdk_sock.a     \
              $(SPDK_DIR)/build/lib/libspdk_json.a     \
@@ -124,6 +136,7 @@ SPDK_LIBS  = $(SPDK_DIR)/build/lib/libspdk_nvme.a     \
              -Wl,-rpath=$(SPDK_DIR)/dpdk/build/lib \
              -lrte_eal -lrte_mempool -lrte_ring -lrte_telemetry \
              -lrte_pci -lrte_bus_pci \
+             $(SPDK_DIR)/isa-l/.libs/libisal.a \
              -lssl -lcrypto \
              -ldl -lrt -lnuma -luuid
 
@@ -152,6 +165,7 @@ LIBPYUDEPOT = python/pyudepot/libpyudepot.so
 ifeq (1, $(BUILD_SPDK))
       CXXFLAGS  += -DUDEPOT_TRT_SPDK
       CXXFLAGS  += $(SPDK_INC)
+      LIBS      += $(SPDK_WHOLE)
       LIBS      += $(SPDK_LIBS)
       LIBS      += $(SPDK_LIBS)
       # DPDK and SPDK is not build with -fPIC, required by JNI. Dont build JNI
@@ -426,12 +440,16 @@ udepot-memcache-test: $(MC_SERVER) $(MC_TEST)
 # grain size is sector-aligned so the O_DIRECT backends can issue their
 # segment metadata writes.
 run_perf_test: bench/io_layer_bench
+	@rm -f /tmp/io-layer-bench.udepot
 	@$(call do_run_test, bench/io_layer_bench --compare --aio -n 200000 -i 5)
 	@$(call do_run_test, bench/io_layer_bench --compare --uring -n 200000 -i 5)
+	@rm -f /tmp/io-layer-bench.udepot
 
 # Python bindings get a Python suite, since the bindings are what it tests.
 run_pyudepot_perf_test: $(LIBPYUDEPOT)
+	@rm -f /tmp/pyudepot-bench.udepot
 	@PERF_PYUDEPOT=1 python3 -m pytest bench/test_pyudepot_perf.py -q
+	@rm -f /tmp/pyudepot-bench.udepot
 
 run_tests: $(TESTS)
 	rm -f /dev/shm/udepot-test
