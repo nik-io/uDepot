@@ -31,3 +31,4 @@ bench/io_layer_bench
 salsa/src/frontends/usalsa++/build/
 python/pyudepot/libpyudepot.so
 .build-config
+test/uDepot/concurrent-get-test

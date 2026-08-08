@@ -152,6 +152,17 @@ SPDK_LIBS  = $(SPDK_DIR)/build/lib/libspdk_util.a     \
              -lssl -lcrypto \
              -ldl -lrt -lnuma -luuid
 
+# Both library targets strip debug symbols, which is right for a release
+# artifact but leaves a crash backtrace with nothing under the outermost
+# exported symbol: a segfault inside the library reports `uDepotPut ()` and
+# nothing beneath it, which is not enough to act on. NO_STRIP=1 keeps the
+# symbols so a debugger can name the frames that matter.
+ifdef NO_STRIP
+STRIP_DEBUG := @true # NO_STRIP set, keeping debug symbols
+else
+STRIP_DEBUG := strip --strip-debug
+endif
+
 LIBCITYHASH_LIB       := $(LIBCITYHASH_DIR)/src/.libs/libcityhash.a
 LIBUSALSA_OBJ         := $(SALSA_DIR)/src/frontends/usalsa++/build/libusalsa++.o
 
@@ -167,6 +178,7 @@ TESTS = bin/udepot-test             \
         test/uDepot/udepot-net-ubench       \
         test/uDepot/Mbuff-test                     \
         test/uDepot/io-helpers              \
+        test/uDepot/concurrent-get-test     \
 
 
 MC_SERVER = bin/udepot-memcache-server
@@ -272,6 +284,30 @@ endif
 $(LIBTRT_OBJ): build_trt
 	@true # dummy recipe, so that Makefile cannot be smart and deduce that $(LIBTRT_OBJ) cannot change (as it does with an empty recipe)
 
+# liburing generates src/include/liburing/compat.h during its configure step,
+# so it is absent in a fresh checkout. uDepot sources that include liburing.h
+# -- src/uDepot/io/trt-uring.cc -- are built by the generic %.o pattern rule,
+# which had no dependency on that step: only $(LIBTRT_OBJ) waited for
+# build_trt. Under make -j on a clean tree those objects could therefore be
+# compiled before the header existed, failing with
+#   liburing.h:19:10: fatal error: liburing/compat.h: No such file or directory
+# The race is invisible once a previous build has generated the header, which
+# is why it showed up on CI rather than on a developer machine. An order-only
+# prerequisite fixes the ordering without making every object rebuild when
+# the header's timestamp changes.
+ifeq (1,$(BUILD_URING))
+LIBURING_COMPAT_H := $(TRT_DIR)/external/liburing/src/include/liburing/compat.h
+URING_ORDER_DEP   := | $(LIBURING_COMPAT_H)
+
+# Routed through build_trt rather than invoking build_uring directly: both this
+# and $(LIBTRT_OBJ) need liburing configured, and build_trt is phony so make
+# runs it exactly once per invocation. Invoking build_uring from here as well
+# let two liburing builds run concurrently under -j, and the second clobbered
+# the first's configure output.
+$(LIBURING_COMPAT_H): build_trt
+	@true # dummy recipe, for the same reason as $(LIBTRT_OBJ) above
+endif
+
 udepot_OBJ = $(patsubst %.cc, %.o, ${udepot_SRC})
 
 udepot_test_SRC = test/uDepot/udepot-test.cc
@@ -297,6 +333,7 @@ udepot_all_SRC = $(udepot_SRC)                     \
                  $(udepot_memcache_test_SRC)       \
                  test/misc/inline_cache.cc         \
                  test/uDepot/io-helpers.cc         \
+                 test/uDepot/concurrent-get-test.cc \
                  bench/io_layer_bench.cc           \
                  src/uDepot/lsa/udepot-dir-map-or.cc \
                  test/uDepot/uDepotDirMapORTest.cc \
@@ -306,7 +343,7 @@ udepot_all_DEP = $(patsubst %.cc, .deps/%.d, ${udepot_all_SRC})
 
 $(LIBUDEPOT): $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) $(LIBCITYHASH_LIB)
 	gcc-ar cr $@ $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ)
-	strip --strip-debug $@
+	$(STRIP_DEBUG) $@
 
 bin/udepot-test:  $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) $(udepot_OBJ) $(udepot_test_OBJ) $(LIBCITYHASH_LIB) Makefile
 	@mkdir -p $(dir $@)
@@ -331,6 +368,9 @@ test/uDepot/udepot-net-ubench: $(LIBTRT_OBJ) $(udepot_net_ubench_OBJ) $(udepot_O
 test/uDepot/io-helpers:  $(LIBTRT_OBJ) test/uDepot/io-helpers.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
 	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
 
+test/uDepot/concurrent-get-test: $(LIBTRT_OBJ) test/uDepot/concurrent-get-test.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
+	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
+
 bench/io_layer_bench: $(LIBTRT_OBJ) bench/io_layer_bench.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
 	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
 
@@ -344,7 +384,7 @@ test/misc/inline_cache: test/misc/inline_cache.cc
 
 $(LIBPYUDEPOT): $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) $(LIBCITYHASH_LIB) python/wrapper/pyudepot.o python/wrapper/pyudepot.hh
 	$(CXX) -shared -Wl,-soname,$@ $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) python/wrapper/pyudepot.o $(LIBS) -o $@
-	strip --strip-debug $@
+	$(STRIP_DEBUG) $@
 
 #
 # uDepot JNI
@@ -391,21 +431,45 @@ test/jni/uDepotJNITest.class: $(uDepotJNI_CLASSFILE) $(JNI_TEST_DIR)/uDepotJNITe
 	@echo DEPS: $<
 	@set -e; $(CXX) $(CXXFLAGS) $(JNI_CXXFLAGS) -MM -MP $< > $@
 
-$(JNI_DIR)/%.o: $(JNI_DIR)/%.cc $(uDepotJNI_C_HEADER) Makefile
+$(JNI_DIR)/%.o: $(JNI_DIR)/%.cc $(uDepotJNI_C_HEADER) Makefile $(URING_ORDER_DEP)
 	$(CXX) $(CXXFLAGS) $(JNI_CXXFLAGS) -c $< -o $@
 
 $(JNI_DIR)/libuDepotJNI.so: $(JNI_OBJ) $(LIBCITYHASH_LIB) Makefile
 	$(CXX) $(LDFLAGS) $(JNI_LDFLAGS) $(udepot_jni_OBJ) $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) -o $@ $(LIBS)
 
+# A failing test must fail the build. This used to print "FAILURE." and then
+# carry on with a zero exit status, so `make run_tests` -- which CI runs --
+# reported success while bin/udepot-test segfaulted on every single run. Do not
+# reintroduce that: if a test is known-broken, quarantine it explicitly via
+# do_run_known_failing_test so it stays visible, rather than making failure
+# silent for everything.
 do_run_test = echo -n "RUNNING TEST: $(1) ... ";           \
               errfile=`mktemp /tmp/udepot-log-XXXX.log`;   \
               $(1) 1>/dev/null 2>$$errfile;                \
-              if [  $$? -ne 0 ]; then                      \
-                  echo "FAILURE. ";                        \
+              rc=$$?;                                      \
+              if [ $$rc -ne 0 ]; then                      \
+                  echo "FAILURE (exit $$rc).";             \
                   cat $$errfile | sed -e 's/^/ stderr: /'; \
+                  rm $$errfile;                            \
+                  exit 1;                                  \
               else                                         \
                   echo "SUCCESS.";                         \
               fi;                                          \
+              rm $$errfile
+
+# Same, for a test that is known to fail for a reason already written down.
+# Reports loudly but does not fail the build. $(2) is the tracking document.
+do_run_known_failing_test =                                       \
+              echo -n "RUNNING TEST (known failing): $(1) ... ";   \
+              errfile=`mktemp /tmp/udepot-log-XXXX.log`;           \
+              $(1) 1>/dev/null 2>$$errfile;                        \
+              rc=$$?;                                              \
+              if [ $$rc -ne 0 ]; then                              \
+                  echo "STILL FAILING (exit $$rc) -- see $(2)";    \
+                  tail -5 $$errfile | sed -e 's/^/ stderr: /';     \
+              else                                                 \
+                  echo "NOW PASSING -- un-quarantine it in the Makefile and close $(2)."; \
+              fi;                                                  \
               rm $$errfile
 
 # run tests
@@ -416,10 +480,18 @@ udepot-gc-test: $(TESTS)
 	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 262144 --size $$(((1048576+4096)*1024+1)) -w 180000 -r 180000 -t 1 --gc --grain-size 32 --val-size 3072)
 	rm -f /dev/shm/udepot-test
 
+# QUARANTINED: both of these segfault/abort on every run, and did so before
+# any of the recent lock fixes -- verified by building and running the same
+# test at the parent commit. A concurrent directory-map grow leaves a reader
+# holding a stale HashEntry *. See docs/TODO-grow-race.md.
+#
+# The second invocation depends on the store the first one leaves behind, so
+# once the first crashes the second is asserting on a corrupt store rather
+# than testing anything.
 udepot-grow-test: $(TESTS)
 	rm -f /dev/shm/udepot-test
-	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 17 --thin --force-destroy --grain-size 32 --val-size 3072)
-	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 23 --thin --grain-size 32 --val-size 3072)
+	@$(call do_run_known_failing_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 17 --thin --force-destroy --grain-size 32 --val-size 3072,docs/TODO-grow-race.md)
+	@$(call do_run_known_failing_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 23 --thin --grain-size 32 --val-size 3072,docs/TODO-grow-race.md)
 	rm -f /dev/shm/udepot-test
 
 ifndef JAVAC
@@ -527,7 +599,14 @@ run_tests: $(TESTS)
 	@$(call do_run_test,bin/udepot-test -f /dev/shm/udepot-test -w 1000 -r 1000 -t 1 --del --grain-size 32 --val-size 3072)
 	@$(call do_run_test,test/uDepot/udepot-utests -u)
 	@$(call do_run_test,test/uDepot/Mbuff-test)
-	@$(call do_run_test,test/rwlock-pagefault/resizable_table)
+	@$(call do_run_test,test/uDepot/concurrent-get-test /tmp/udepot-concurrent-get-test)
+	# test/rwlock-pagefault/resizable_table was invoked here, but that binary
+	# has no source, no build rule, and no history in this repo -- the line was
+	# present in the initial import and the test itself never came with it. It
+	# "ran" for years as a command-not-found that do_run_test swallowed.
+	# Removed rather than quarantined: there is nothing to un-quarantine.
+	# rwlock_pagefault is the mechanism implicated in docs/TODO-grow-race.md,
+	# so it is worth writing a real test for it -- see that document.
 	rm -f /dev/shm/udepot-test
 	make udepot-grow-test
 	make udepot-gc-test
@@ -562,7 +641,7 @@ build-config-check:
 $(BUILD_CONFIG_FILE): build-config-check
 	@:
 
-%.o: %.cc Makefile $(BUILD_CONFIG_FILE)
+%.o: %.cc Makefile $(BUILD_CONFIG_FILE) $(URING_ORDER_DEP)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 lclean:

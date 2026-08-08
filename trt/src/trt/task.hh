@@ -27,7 +27,15 @@ class AsyncObj;
 
 // CoroTask is the coroutine return type for all TRT task functions.
 // Task functions must be declared as: CoroTask my_task(void *arg) { ... co_return val; }
-class CoroTask {
+//
+// [[nodiscard]] is load-bearing, not hygiene. initial_suspend() is
+// suspend_always, so *calling* a CoroTask function only builds the frame --
+// none of the body runs until something resumes it. Discarding the result is
+// therefore always a bug: the call silently does nothing and leaks the frame.
+// This is exactly how uDepotLock::lock() came to be a no-op at four call
+// sites, leaving the shared Mbuff cache unlocked (docs/concurrent-get-fix.md).
+// Non-coroutine callers want lock_blocking(); coroutine callers must co_await.
+class [[nodiscard]] CoroTask {
 public:
     struct promise_type {
         std::coroutine_handle<> continuation_ = nullptr; // set when co_await'd by outer

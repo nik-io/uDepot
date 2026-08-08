@@ -39,6 +39,14 @@ pyexists = libudepot.uDepotExists
 
 pyopen.argtypes  = [c_char_p, c_ulonglong, c_int]
 pyopen_backend.argtypes = [c_char_p, c_ulonglong, c_int, c_int]
+# Both open calls return a KV* . Without an explicit restype ctypes assumes
+# c_int and truncates the 64-bit handle to 32 bits -- 0x555555cd8a00 comes
+# back as 0x55cd8a00 -- and the next call segfaults dereferencing it. Whether
+# it crashes depends on where the allocator happens to place the object, so
+# this hid for a long time and then failed reliably on one machine and not
+# another.
+pyopen.restype = c_void_p
+pyopen_backend.restype = c_void_p
 pyclose.argtypes = [c_void_p]
 pyget.argtypes   = [c_void_p, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_uint, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_ulonglong]
 pyput.argtypes   = [c_void_p, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_uint, ndpointer(ctypes.c_ubyte, flags="C_CONTIGUOUS"), c_ulonglong]

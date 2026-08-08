@@ -135,7 +135,7 @@ static int uDepotMapPutTestMT(const u64 start, const u64 item_nr)
 	for (u64 i = start; i < start + item_nr; ++i) {
 		const u64 key = (i * prime);
 		HashEntry *trgt = nullptr;
-		map_g->lock(key);
+		map_g->lock_blocking(key);
 		int rc = map_g->lookup(key, &trgt);
                 switch (rc) {
                 case  ENOSPC:
@@ -168,7 +168,7 @@ static int uDepotMapPutTestMT(const u64 start, const u64 item_nr)
 {
 	for (u64 i = start; i < start + item_nr; ++i) {
 		const u64 key = (i * prime);
-		map_g->lock(key);
+		map_g->lock_blocking(key);
 		HashEntry *trgt = map_g->lookup(key, i);
 		// assert(nullptr != trgt);
 		if (nullptr == trgt) {

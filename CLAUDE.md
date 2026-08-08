@@ -10,6 +10,22 @@
    it impossible, a check in the build, or a documented rule. A fix that only
    repairs the current instance is not finished.
 
+## Commit Attribution
+
+Commits are **authored by nik-io <nicioan@gmail.com>** and **co-authored by
+Claude**. Claude is a co-author, not the author.
+
+`.claude/settings.json` sets `GIT_AUTHOR_*` and `GIT_COMMITTER_*` for this, and
+is checked in so it survives a fresh checkout or container. If it ever fails to
+apply, set it explicitly rather than committing as Claude:
+
+```bash
+git config user.name  "nik-io"
+git config user.email "nicioan@gmail.com"
+```
+
+Keep the `Co-Authored-By: Claude ...` trailer on Claude-assisted commits.
+
 ## Project Overview
 
 uDepot is a high-performance key-value store for NVMe storage, built on a coroutine-based task runtime (TRT). It supports multiple I/O backends (POSIX, O_DIRECT, SPDK, io_uring) and NVMe over Fabrics (TCP/RDMA). Reference paper: https://www.usenix.org/system/files/fast19-kourtis.pdf
@@ -29,6 +45,7 @@ These are foundational constraints. Every change must preserve them.
 ## Architecture
 
 - **TRT (Task Runtime)**: Coroutine-based cooperative scheduler in `trt/`. All task functions return `trt::CoroTask`. Use `co_await`/`co_return` — never legacy jctx yield.
+- **Never discard a `trt::CoroTask`.** `initial_suspend()` is `suspend_always`, so calling a `CoroTask` function only builds the frame — the body does not run until something resumes it. A discarded `CoroTask` is a silent no-op plus a leaked frame, not a completed call. `CoroTask` is `[[nodiscard]]` and the build uses `-Werror`, so this is now a compile error; do not silence it with a cast to `void`. This is not hypothetical: `uDepotLock::lock()` returns `CoroTask`, and six call sites discarded it, leaving the shared Mbuff cache and the directory-grow path completely unlocked (`docs/concurrent-get-fix.md`). **From a non-coroutine, call `lock_blocking()`; from a coroutine, `co_await lock()`.**
 - **I/O backends**: Located in `src/uDepot/io/`. Each backend implements `uDepotIO_` interface. SPDK backends require DMA-safe buffers for NVMe commands.
 - **SpdkQpair**: Per-thread NVMe queue pair. `read_sync`/`write_sync` handle DMA buffer allocation internally. `read_raw_sync`/`write_raw_sync` expect pre-allocated DMA buffers.
 - **Python bindings**: `pyudepot` via ctypes in `src/uDepot/net/py-udepot.cc`. Shared library built as `libpyudepot.so`.
@@ -51,6 +68,14 @@ Follow the [Google C++ Style Guide](https://google.github.io/styleguide/cppguide
 - SPDK tests require `BUILD_SPDK=1` and a checked-out SPDK v24.09 submodule
 - Non-SPDK tests must always pass: `make clean && make` with default flags
 - Do not merge code that breaks the non-SPDK build
+
+**A failing test must fail the build.** `do_run_test` used to print `FAILURE.`
+and then exit 0, so `make run_tests` — which CI runs — reported success while
+`bin/udepot-test` segfaulted on *every* run of `udepot-grow-test`. It now
+propagates the exit status. If a test is genuinely known-broken, quarantine it
+explicitly with `do_run_known_failing_test` and a tracking document (see
+`docs/TODO-grow-race.md`) so it stays visible; never make failure silent for
+every test to accommodate one.
 
 ### Performance tests
 

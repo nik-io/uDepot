@@ -81,7 +81,7 @@ uDepotDirMapOR<RT>::grow(const u64 seg_size, const u64 grain_size)
 	int rc = 0;
 	std::vector<DirMapEntry> *const old_dir = dir_ref_m.directory.load();
 
-	grow_lock_m.lock();
+	grow_lock_m.lock_blocking();
 	if (old_dir != dir_ref_m.directory.load()) {
 		UDEPOT_DBG("Another grow happened in the meantime, retry.");
 		grow_lock_m.unlock();
@@ -284,7 +284,7 @@ uDepotDirMapOR<RT>::alloc_shadow(const u64 seg_size, const u64 grain_size)
 	int rc = 0;
 	std::vector<DirMapEntry> *const old_dir = dir_ref_m.directory.load();
 
-	grow_lock_m.lock();
+	grow_lock_m.lock_blocking();
 	if (old_dir != dir_ref_m.directory.load()) {
 		UDEPOT_DBG("Another grow happened in the meantime, retry.");
 		grow_lock_m.unlock();
@@ -486,7 +486,7 @@ uDepotDirMapOR<RT>::grow_finished(const u64 seg_size, const u64 grain_size)
 	std::vector<DirMapEntry> *const old_dir = dir_ref_m.directory.load();
 	std::vector<DirMapEntry> *const new_dir = dir_ref_m.shadow_directory.load();
 	assert(0 == dir_ref_m.state.load());
-	grow_lock_m.lock();
+	grow_lock_m.lock_blocking();
 	if (old_dir != dir_ref_m.directory.load()) {
 		UDEPOT_DBG("Another grow happened in the meantime, retry.");
 		grow_lock_m.unlock();

@@ -65,7 +65,7 @@ public:
 		}
 
 		if (lock)
-			lock->lock();
+			lock->lock_blocking();
 
 		// if nothing in cache try to allocate
 		if (cache->size() == 0) {
@@ -102,7 +102,7 @@ public:
 		}
 
 		if (lock)
-			lock->lock();
+			lock->lock_blocking();
 
 		try {
 			cache->push_front(mb);
@@ -127,7 +127,7 @@ private:
 	// The buffers in the mbuff will are freed in the destructor.
 	Mbuff *mb_alloc(void) {
 		Mbuff *ret;
-		mbuff_cache_lock_m.lock();
+		mbuff_cache_lock_m.lock_blocking();
 		try {
 			std::type_index tyidx = mb_alloc_m.mbuff_type_index();
 			mbuff_cache_m.emplace_back(tyidx);
