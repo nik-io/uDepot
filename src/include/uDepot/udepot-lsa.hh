@@ -166,7 +166,7 @@ private:
 
 	uDepotNet<typename RT::Net> net_m;
 
-	MbuffCache<typename RT::LockTy>         mb_cache_m;
+	MbuffCache<>         mb_cache_m;
 
 	int register_local_region() override;
 	int unregister_local_region() override;

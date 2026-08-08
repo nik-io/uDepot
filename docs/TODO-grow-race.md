@@ -122,6 +122,58 @@ Worth trying next, roughly in order of cost:
   re-runs with `EAGAIN`. Confirm the retry re-derives `udm` from the *new*
   directory rather than reusing anything cached from before the grow.
 
+## Attempted and reverted: making grow() a coroutine
+
+`grow_lock_m` is currently taken with `lock_blocking()`. That is correct from
+an ordinary function, but **not** safe from inside a TRT task:
+`TrtLock::lock_blocking()` spins on `sched_yield()`, which yields the OS thread
+and not the task, so if the holder is another task on the same scheduler thread
+it can never run. `grow()` is reachable from `put_mbuff`, which is a task under
+`RuntimeTrt`.
+
+The obvious fix is to make `grow()` a `trt::CoroTask` and `co_await
+grow_lock_m.lock()`. That was implemented (callers: `put_mbuff` co_awaits;
+`init()` and `try_restore_entry()` drive it with `run_sync()`, both being
+single-threaded) and it **builds clean and hangs**, so it was reverted.
+
+What the hang looks like, on `-t 17 --thin`:
+
+- CPU time stays at `00:00:00` while elapsed time climbs — sleeping, not slow.
+- All 17 worker threads are blocked in `PthreadLock::lock()` on the **same**
+  mutex.
+- No thread is anywhere in `grow()`, `write_wait_readers()`, or `rd_enter()`.
+- The mutex's `__data.__owner` names a thread that is itself blocked on that
+  same mutex.
+
+So the lock is taken and never released. Note what this implies regardless of
+the coroutine conversion: **`grow_lock_m` has not actually been held since the
+migration** — it was a discarded `CoroTask` until `lock_blocking()` was added —
+so the code under it has never run with the lock genuinely taken. Making the
+lock real is what surfaced this. It is not obviously a bug in the conversion;
+it is more likely a re-entrancy or lost-unlock path in the grow logic that was
+harmless while the lock did nothing.
+
+Caveat on the owner evidence: glibc does not reliably maintain `__owner` for
+default-type mutexes, so "the owner is waiting on itself" should be treated as
+a strong hint rather than proof of self-deadlock. The 17-threads-one-mutex
+observation does not depend on it.
+
+Worth checking first when picking this up:
+
+- whether `grow()` can be re-entered on one thread — e.g. via
+  `salsa::SalsaCtlr::allocate_grains()`'s `do { } while (EAGAIN)` loop
+  triggering GC, and GC's `gc_callback` reaching a path that grows;
+- whether any `co_return` path in `grow()` can be reached with the lock held
+  (the reverted version unlocked on all three exits, which is why a re-entrancy
+  is the better hypothesis);
+- whether `lock_blocking()` on `grow_lock_m` has the same latent problem and is
+  simply not being hit by the current test, since it is the same lock either
+  way.
+
+Until that is understood, `grow_lock_m` stays on `lock_blocking()`: the test
+fails with an abort rather than hanging, and a hang is worse — it burns a CI
+slot to a timeout and hides everything behind it.
+
 ## Why the segfault was never caught by CI
 
 `do_run_test` printed `FAILURE.` and then exited 0, so `make run_tests` — which

@@ -30,15 +30,19 @@ So `lock->lock();` acquires nothing and leaks a frame. Only `co_await
 lock->lock()` (from a coroutine) or `lock->lock_blocking()` (from an ordinary
 function) actually locks.
 
-Affected call sites, all now using `lock_blocking()` — every one is a plain
-non-coroutine function, so `co_await` was not an option:
+Affected call sites — every one a plain non-coroutine function, so `co_await`
+was not available to them as written:
 
-| file | what was unprotected |
-|---|---|
-| `src/include/uDepot/mbuff-cache.hh` (×3) | shared Mbuff cache + Mbuff allocation |
-| `src/uDepot/lsa/udepot-dir-map-or.cc` (×3) | directory grow / shadow alloc |
-| `src/uDepot/lsa/udepot-directory-map.cc` | directory grow |
-| `test/uDepot/uDepotMapTest.cc` (×2) | the *multi-threaded* map tests, which were running unlocked |
+| file | what was unprotected | fix |
+|---|---|---|
+| `src/include/uDepot/mbuff-cache.hh` (×3) | shared Mbuff cache + Mbuff allocation | `std::mutex` |
+| `src/uDepot/lsa/udepot-directory-map.cc` | directory grow | `lock_blocking()` — the coroutine conversion was tried and reverted, see below |
+| `src/uDepot/lsa/udepot-dir-map-or.cc` (×3) | directory grow / shadow alloc | `lock_blocking()`; experimental, now excluded from the build (`docs/TODO-dir-map-or.md`) |
+| `test/uDepot/uDepotMapTest.cc` (×2) | the *multi-threaded* map tests, which were running unlocked | `lock_blocking()` (plain test threads) |
+
+Why they differ is the whole subject of "What `lock_blocking()` actually is"
+below: the right lock depends on whether the critical section can suspend, and
+on whether the caller can afford to block a scheduler thread.
 
 ## Why it presented as an I/O sizing assertion
 
@@ -77,13 +81,13 @@ The call sites were correct when they were written. `git log --follow` on
 Before `23f51de`:
 
 ```cpp
-virtual void lock() = 0;                 // eager; `lock->lock();` took the mutex
+virtual void lock() = 0;        // ordinary call; `lock->lock();` took the mutex
 ```
 
 After:
 
 ```cpp
-virtual trt::CoroTask lock() = 0;        // lazy; `lock->lock();` does nothing
+virtual trt::CoroTask lock() = 0;   // must be driven; `lock->lock();` does nothing
 ```
 
 `TrtLock::lock()` needed to become a coroutine so it could `co_await
@@ -112,9 +116,12 @@ build that was otherwise clean. The signature change was silent at every call
 site that did not need editing to keep compiling, which is precisely the set of
 call sites that needed editing to keep *working*.
 
-This is the general hazard, not a uDepot quirk: **converting an eager function
-to a coroutine changes its behaviour at every existing call site while changing
-its syntax at none of them.** `[[nodiscard]]` on the coroutine type is the
+The general hazard, stated correctly: **moving from stackful to stackless
+coroutines changes who must drive a suspending call, at every existing call
+site, while changing the syntax at none of them.** The pre-migration `lock()`
+was not eager — TRT had been doing coroutine suspension by hand with longjmp
+for years — but suspension was *invisible to callers*, and stackless coroutines
+make it every caller's problem. `[[nodiscard]]` on the coroutine type is the
 mechanical defence, and is now in place — a full `-Werror` build is the proof
 that no discarded `CoroTask` remains.
 
@@ -124,6 +131,75 @@ here (no SPDK submodule in the container). Inspection of the SPDK-only sources
 found only `std::mutex` locks, which are eager and unaffected, but that is grep
 rather than the compiler. Anyone with SPDK checked out should build it once
 with `[[nodiscard]]` in place to close this properly.
+
+## What `lock_blocking()` actually is, and why it exists
+
+`lock_blocking()` is not a serialization principle TRT was missing. It is an
+artifact of going **stackless**, and it is worth being precise about that
+because the earlier framing here ("eager function became lazy") was wrong.
+
+Before `cfed697 trt: replace jctx fibers with C++20 coroutines`, TRT's yield
+was:
+
+```cpp
+static void yield(void);      // plain call; switched stacks via jctx/longjmp
+```
+
+That is a **stackful** coroutine. Suspension is implemented by swapping the
+whole stack, so a suspending function is called like any other function, at any
+call depth, with no syntactic marking and no effect on its callers. One `lock()`
+served everyone:
+
+| | behaviour | caller wrote |
+|---|---|---|
+| `PthreadLock::lock()` | blocks the OS thread | `lock->lock();` |
+| `TrtLock::lock()` | yields the fiber | `lock->lock();` |
+
+C++20 coroutines are **stackless**: a coroutine suspends only its own frame, by
+returning to its caller. Every caller in the chain must itself be a coroutine
+and `co_await` — function coloring, and it is viral.
+
+`run_sync()` is not a general escape hatch, because it is only valid for
+coroutines that never truly suspend. That holds for `PthreadLock::lock()` and
+fails for `TrtLock::lock()`, which really does `co_await trt::T::yield()`. With
+no single implementation able to serve both colors of caller, the API had to
+split, and `lock_blocking()` is the non-suspending half.
+
+### `lock_blocking()` is not safe everywhere
+
+```cpp
+void lock_blocking() { for(;;) { if (trylock()==0) return; sched_yield(); } }
+```
+
+`sched_yield()` yields the **OS thread**, not the TRT task. If the lock holder
+is another task on the same scheduler thread, it can only run when the current
+task yields to the TRT scheduler — which spinning never does. Deadlock.
+
+So `lock_blocking()` is correct only where blocking the thread is acceptable:
+genuinely non-TRT threads, and critical sections that cannot themselves wait on
+another task. Choosing it anywhere else trades a race for a hang.
+
+### How each site was resolved
+
+| site | resolution | why |
+|---|---|---|
+| `MbuffCache` (×3) | plain `std::mutex` | Section is one deque push/pop: no I/O, no suspension point, nothing for a suspending lock to buy. Using `RT::LockTy` here forced `lock_blocking()` (the methods are ordinary functions) and with `TrtLock` that is the deadlock above. A `std::mutex` removes the coloring question entirely. |
+| `uDepotDirectoryMap<RT>::grow()` | still `lock_blocking()` | The `std::mutex` argument does **not** apply here: the critical section is long and itself waits on other tasks (`write_wait_readers`), so a thread-blocking wait can deadlock under TRT. The correct fix is to make `grow()` a coroutine and `co_await` — that was implemented and **hangs**, so it is reverted and documented in `docs/TODO-grow-race.md`. Taking this lock for real appears to expose a pre-existing re-entrancy, since it has not actually been held since the migration. |
+| `uDepotDirMapOR` (×3) | left on `lock_blocking()` | Experimental; now excluded from the build, which does not compile anyway. `docs/TODO-dir-map-or.md`. |
+
+### Known remaining hazards
+
+1. `grow_lock_m` is taken with `lock_blocking()`, which is unsafe from a TRT
+   task for exactly the reason above. Converting `grow()` to a coroutine is the
+   right fix and currently hangs; see `docs/TODO-grow-race.md`.
+2. `write_wait_readers()` polls with `std::this_thread::sleep_for(5ms)`. Inside
+   a TRT task that blocks the scheduler thread, and the readers it waits for may
+   be tasks on that same thread. Predates all of the above; needs an awaitable
+   wait.
+
+Both are confined to the TRT runtimes. The pyudepot path
+(`RuntimePosixODirect`, `PthreadLock`) blocks a plain thread, which is correct
+there — that is the path the measurements in this document cover.
 
 ## Why it was never hit before
 

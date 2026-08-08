@@ -26,6 +26,18 @@
 #include "uDepot/lsa/metadata.hh"
 #include "uDepot/lsa/store.hh"
 
+// EXPERIMENTAL, EXCLUDED FROM THE BUILD.
+//
+// uDepotDirMapOR is an alternative directory map with a shadow directory. It
+// is not a supported feature, nothing compiles this file, and it does not
+// currently build ('udepot_io_m' was not declared in this scope, plus -Werror
+// format warnings) -- all of which predates the recent lock and grow work.
+//
+// It is kept in the tree rather than deleted so the approach is not lost.
+// Read docs/TODO-dir-map-or.md before reviving it: it still carries the
+// discarded-CoroTask lock defects described in docs/concurrent-get-fix.md,
+// and the grow-path caveats in docs/TODO-grow-race.md.
+
 namespace udepot {
 
 template<typename RT>
