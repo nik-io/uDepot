@@ -68,6 +68,63 @@ Wrong answers came with it: `get()` returned `ENODATA` for keys that existed.
 That is worse than the crash, and on a build with `NDEBUG` (no assertion) it
 is all that would be left.
 
+## Root cause: the C++20 coroutine migration
+
+The call sites were correct when they were written. `git log --follow` on
+`src/include/uDepot/sync.hh` shows exactly two commits: the initial import, and
+`23f51de udepot: migrate to C++20 coroutine API`.
+
+Before `23f51de`:
+
+```cpp
+virtual void lock() = 0;                 // eager; `lock->lock();` took the mutex
+```
+
+After:
+
+```cpp
+virtual trt::CoroTask lock() = 0;        // lazy; `lock->lock();` does nothing
+```
+
+`TrtLock::lock()` needed to become a coroutine so it could `co_await
+trt::T::yield()` instead of using the legacy jctx yield. Because the two locks
+share a virtual base, `PthreadLock::lock()` was dragged along — even though it
+never suspends and had no reason to be a coroutine.
+
+The migration introduced `lock_blocking()` in the same commit precisely as the
+escape hatch for non-coroutine callers (it did not exist before), and used it
+correctly in `udepot-map.hh`. So the hazard was understood. What it missed were
+the callers living in files the commit never opened:
+
+| file | in `23f51de`? | left broken |
+|---|---|---|
+| `src/uDepot/udepot-lsa.cc` | yes (459 lines of `co_await`) | — |
+| `src/include/uDepot/lsa/udepot-map.hh` | yes (`lock_blocking` added) | — |
+| `src/include/uDepot/mbuff-cache.hh` | **no** | 3 sites |
+| `src/uDepot/lsa/udepot-dir-map-or.cc` | **no** | 3 sites |
+| `src/uDepot/lsa/udepot-directory-map.cc` | **no** | 1 site |
+| `test/uDepot/uDepotMapTest.cc` | **no** | 2 sites |
+
+**Why nothing caught it:** changing a function's return type from `void` to a
+class type leaves `lock->lock();` valid C++. The call still compiles, builds a
+temporary, and discards it. No warning, no error — under `-Wall -Werror`, in a
+build that was otherwise clean. The signature change was silent at every call
+site that did not need editing to keep compiling, which is precisely the set of
+call sites that needed editing to keep *working*.
+
+This is the general hazard, not a uDepot quirk: **converting an eager function
+to a coroutine changes its behaviour at every existing call site while changing
+its syntax at none of them.** `[[nodiscard]]` on the coroutine type is the
+mechanical defence, and is now in place — a full `-Werror` build is the proof
+that no discarded `CoroTask` remains.
+
+Residual gap: that proof covers the default and `BUILD_URING=1` builds.
+`BUILD_SPDK=1` compiles additional translation units that were not compiled
+here (no SPDK submodule in the container). Inspection of the SPDK-only sources
+found only `std::mutex` locks, which are eager and unaffected, but that is grep
+rather than the compiler. Anyone with SPDK checked out should build it once
+with `[[nodiscard]]` in place to close this properly.
+
 ## Why it was never hit before
 
 uDepot's threaded deployments are not affected, and the code really has been
