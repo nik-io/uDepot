@@ -178,6 +178,7 @@ TESTS = bin/udepot-test             \
         test/uDepot/udepot-net-ubench       \
         test/uDepot/Mbuff-test                     \
         test/uDepot/io-helpers              \
+        test/uDepot/concurrent-get-test     \
 
 
 MC_SERVER = bin/udepot-memcache-server
@@ -332,6 +333,7 @@ udepot_all_SRC = $(udepot_SRC)                     \
                  $(udepot_memcache_test_SRC)       \
                  test/misc/inline_cache.cc         \
                  test/uDepot/io-helpers.cc         \
+                 test/uDepot/concurrent-get-test.cc \
                  bench/io_layer_bench.cc           \
                  src/uDepot/lsa/udepot-dir-map-or.cc \
                  test/uDepot/uDepotDirMapORTest.cc \
@@ -364,6 +366,9 @@ test/uDepot/udepot-net-ubench: $(LIBTRT_OBJ) $(udepot_net_ubench_OBJ) $(udepot_O
 	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
 
 test/uDepot/io-helpers:  $(LIBTRT_OBJ) test/uDepot/io-helpers.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
+	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
+
+test/uDepot/concurrent-get-test: $(LIBTRT_OBJ) test/uDepot/concurrent-get-test.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
 	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
 
 bench/io_layer_bench: $(LIBTRT_OBJ) bench/io_layer_bench.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
@@ -562,6 +567,7 @@ run_tests: $(TESTS)
 	@$(call do_run_test,bin/udepot-test -f /dev/shm/udepot-test -w 1000 -r 1000 -t 1 --del --grain-size 32 --val-size 3072)
 	@$(call do_run_test,test/uDepot/udepot-utests -u)
 	@$(call do_run_test,test/uDepot/Mbuff-test)
+	@$(call do_run_test,test/uDepot/concurrent-get-test /tmp/udepot-concurrent-get-test)
 	@$(call do_run_test,test/rwlock-pagefault/resizable_table)
 	rm -f /dev/shm/udepot-test
 	make udepot-grow-test

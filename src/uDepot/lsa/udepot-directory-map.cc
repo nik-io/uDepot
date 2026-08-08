@@ -156,7 +156,7 @@ uDepotDirectoryMap<RT>::grow()
 	int rc = 0;
 	std::vector<DirMapEntry> *const old_dir = dir_ref_m.directory.load();
 
-	grow_lock_m.lock();
+	grow_lock_m.lock_blocking();
 	if (old_dir != dir_ref_m.directory.load()) {
 		UDEPOT_DBG("Another grow happened in the meantime, retry.");
 		grow_lock_m.unlock();

@@ -45,6 +45,7 @@ These are foundational constraints. Every change must preserve them.
 ## Architecture
 
 - **TRT (Task Runtime)**: Coroutine-based cooperative scheduler in `trt/`. All task functions return `trt::CoroTask`. Use `co_await`/`co_return` — never legacy jctx yield.
+- **Never discard a `trt::CoroTask`.** `initial_suspend()` is `suspend_always`, so calling a `CoroTask` function only builds the frame — the body does not run until something resumes it. A discarded `CoroTask` is a silent no-op plus a leaked frame, not a completed call. `CoroTask` is `[[nodiscard]]` and the build uses `-Werror`, so this is now a compile error; do not silence it with a cast to `void`. This is not hypothetical: `uDepotLock::lock()` returns `CoroTask`, and six call sites discarded it, leaving the shared Mbuff cache and the directory-grow path completely unlocked (`docs/concurrent-get-fix.md`). **From a non-coroutine, call `lock_blocking()`; from a coroutine, `co_await lock()`.**
 - **I/O backends**: Located in `src/uDepot/io/`. Each backend implements `uDepotIO_` interface. SPDK backends require DMA-safe buffers for NVMe commands.
 - **SpdkQpair**: Per-thread NVMe queue pair. `read_sync`/`write_sync` handle DMA buffer allocation internally. `read_raw_sync`/`write_raw_sync` expect pre-allocated DMA buffers.
 - **Python bindings**: `pyudepot` via ctypes in `src/uDepot/net/py-udepot.cc`. Shared library built as `libpyudepot.so`.
