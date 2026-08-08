@@ -600,7 +600,13 @@ run_tests: $(TESTS)
 	@$(call do_run_test,test/uDepot/udepot-utests -u)
 	@$(call do_run_test,test/uDepot/Mbuff-test)
 	@$(call do_run_test,test/uDepot/concurrent-get-test /tmp/udepot-concurrent-get-test)
-	@$(call do_run_test,test/rwlock-pagefault/resizable_table)
+	# test/rwlock-pagefault/resizable_table was invoked here, but that binary
+	# has no source, no build rule, and no history in this repo -- the line was
+	# present in the initial import and the test itself never came with it. It
+	# "ran" for years as a command-not-found that do_run_test swallowed.
+	# Removed rather than quarantined: there is nothing to un-quarantine.
+	# rwlock_pagefault is the mechanism implicated in docs/TODO-grow-race.md,
+	# so it is worth writing a real test for it -- see that document.
 	rm -f /dev/shm/udepot-test
 	make udepot-grow-test
 	make udepot-gc-test

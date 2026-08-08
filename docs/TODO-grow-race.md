@@ -71,7 +71,17 @@ being swallowed along with everything else.
 ## Where to look
 
 `rwlock_pagefault` (`RT::RwpfTy`) is the mechanism meant to keep readers out of
-a table while it is being remapped. Worth establishing first:
+a table while it is being remapped.
+
+**It has no test.** `make run_tests` invoked `test/rwlock-pagefault/resizable_table`,
+but that binary has no source, no build rule, and no history in this repo — the
+line came in with the initial import and the test never did. Because
+`do_run_test` swallowed failures, the resulting command-not-found reported as a
+silent non-failure for the entire life of the repo. So the one component most
+likely to be at fault here has been completely uncovered the whole time.
+Writing that test is probably the first step, not the last.
+
+Worth establishing first:
 
 - whether `uDepotMap::insert`/`update` take the pagefault read lock at all on
   the `RuntimePosix` path, or only on the TRT one (`rwlock_pagefault_trt`);
