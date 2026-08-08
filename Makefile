@@ -437,15 +437,39 @@ $(JNI_DIR)/%.o: $(JNI_DIR)/%.cc $(uDepotJNI_C_HEADER) Makefile $(URING_ORDER_DEP
 $(JNI_DIR)/libuDepotJNI.so: $(JNI_OBJ) $(LIBCITYHASH_LIB) Makefile
 	$(CXX) $(LDFLAGS) $(JNI_LDFLAGS) $(udepot_jni_OBJ) $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) -o $@ $(LIBS)
 
+# A failing test must fail the build. This used to print "FAILURE." and then
+# carry on with a zero exit status, so `make run_tests` -- which CI runs --
+# reported success while bin/udepot-test segfaulted on every single run. Do not
+# reintroduce that: if a test is known-broken, quarantine it explicitly via
+# do_run_known_failing_test so it stays visible, rather than making failure
+# silent for everything.
 do_run_test = echo -n "RUNNING TEST: $(1) ... ";           \
               errfile=`mktemp /tmp/udepot-log-XXXX.log`;   \
               $(1) 1>/dev/null 2>$$errfile;                \
-              if [  $$? -ne 0 ]; then                      \
-                  echo "FAILURE. ";                        \
+              rc=$$?;                                      \
+              if [ $$rc -ne 0 ]; then                      \
+                  echo "FAILURE (exit $$rc).";             \
                   cat $$errfile | sed -e 's/^/ stderr: /'; \
+                  rm $$errfile;                            \
+                  exit 1;                                  \
               else                                         \
                   echo "SUCCESS.";                         \
               fi;                                          \
+              rm $$errfile
+
+# Same, for a test that is known to fail for a reason already written down.
+# Reports loudly but does not fail the build. $(2) is the tracking document.
+do_run_known_failing_test =                                       \
+              echo -n "RUNNING TEST (known failing): $(1) ... ";   \
+              errfile=`mktemp /tmp/udepot-log-XXXX.log`;           \
+              $(1) 1>/dev/null 2>$$errfile;                        \
+              rc=$$?;                                              \
+              if [ $$rc -ne 0 ]; then                              \
+                  echo "STILL FAILING (exit $$rc) -- see $(2)";    \
+                  tail -5 $$errfile | sed -e 's/^/ stderr: /';     \
+              else                                                 \
+                  echo "NOW PASSING -- un-quarantine it in the Makefile and close $(2)."; \
+              fi;                                                  \
               rm $$errfile
 
 # run tests
@@ -456,10 +480,18 @@ udepot-gc-test: $(TESTS)
 	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 262144 --size $$(((1048576+4096)*1024+1)) -w 180000 -r 180000 -t 1 --gc --grain-size 32 --val-size 3072)
 	rm -f /dev/shm/udepot-test
 
+# QUARANTINED: both of these segfault/abort on every run, and did so before
+# any of the recent lock fixes -- verified by building and running the same
+# test at the parent commit. A concurrent directory-map grow leaves a reader
+# holding a stale HashEntry *. See docs/TODO-grow-race.md.
+#
+# The second invocation depends on the store the first one leaves behind, so
+# once the first crashes the second is asserting on a corrupt store rather
+# than testing anything.
 udepot-grow-test: $(TESTS)
 	rm -f /dev/shm/udepot-test
-	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 17 --thin --force-destroy --grain-size 32 --val-size 3072)
-	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 23 --thin --grain-size 32 --val-size 3072)
+	@$(call do_run_known_failing_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 17 --thin --force-destroy --grain-size 32 --val-size 3072,docs/TODO-grow-race.md)
+	@$(call do_run_known_failing_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 23 --thin --grain-size 32 --val-size 3072,docs/TODO-grow-race.md)
 	rm -f /dev/shm/udepot-test
 
 ifndef JAVAC

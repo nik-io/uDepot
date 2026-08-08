@@ -69,6 +69,14 @@ Follow the [Google C++ Style Guide](https://google.github.io/styleguide/cppguide
 - Non-SPDK tests must always pass: `make clean && make` with default flags
 - Do not merge code that breaks the non-SPDK build
 
+**A failing test must fail the build.** `do_run_test` used to print `FAILURE.`
+and then exit 0, so `make run_tests` — which CI runs — reported success while
+`bin/udepot-test` segfaulted on *every* run of `udepot-grow-test`. It now
+propagates the exit status. If a test is genuinely known-broken, quarantine it
+explicitly with `do_run_known_failing_test` and a tracking document (see
+`docs/TODO-grow-race.md`) so it stays visible; never make failure silent for
+every test to accommodate one.
+
 ### Performance tests
 
 No baselines and no base-revision A/B builds. Throughput on cloud containers
