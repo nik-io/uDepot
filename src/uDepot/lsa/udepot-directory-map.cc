@@ -226,6 +226,28 @@ uDepotDirectoryMap<RT>::grow()
 	}
 	dir_ref_m.rwpflock.write_enter();
 
+	// Drain in-flight readers *before* touching the protection bits.
+	//
+	// This used to happen further down, after the copy. Overlapping the copy
+	// with live readers was the whole point of rwlock_pagefault: the table
+	// went PROT_READ, a reader that tried to write to it took SIGSEGV, and
+	// rwlock_pagefault::rd_execute__ rolled the operation back via
+	// siglongjmp and retried it.
+	//
+	// That rollback no longer exists. The C++20 coroutine migration (23f51de)
+	// replaced rd_execute__ with a bare rd_enter()/rd_exit() pair in
+	// uDepotSalsa::local_op_execute, because a sigsetjmp checkpoint cannot
+	// survive a co_await -- the coroutine pops the stack the checkpoint
+	// refers to. rd_execute__ has had no callers since, so rwlpf_rb__.rb_set
+	// is always 0, and sigsegv_handler chains straight to the default
+	// handler. The fault stopped being recoverable and became a crash.
+	//
+	// So do not let readers see a protected table at all: block new ones
+	// (write_enter, above), wait for the in-flight ones to leave, and only
+	// then change protections. Costs the reader/copy overlap, which has been
+	// worth negative since the migration. See docs/TODO-grow-race.md.
+	dir_ref_m.rwpflock.write_wait_readers();
+
 	// switch old directory to read only mode
 	for (auto &dme : (*old_dir)) {
 		const int err = mprotect(dme.mm_region, dme.size_b, PROT_READ);
@@ -305,7 +327,7 @@ uDepotDirectoryMap<RT>::grow()
 		}
 	}
 
-	dir_ref_m.rwpflock.write_wait_readers();
+	// readers were already drained before the protection changes above
 
 	// nobody should be holding a reference to old_dir anymore
 	for (auto &dme : (*old_dir)) {

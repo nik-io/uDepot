@@ -142,6 +142,12 @@ uDepotDirMapOR<RT>::grow(const u64 seg_size, const u64 grain_size)
 	}
 	dir_ref_m.rwpflock.write_enter();
 
+	// Drain in-flight readers before touching the protection bits; the
+	// page-fault rollback that used to make the overlap safe is gone. Same
+	// reasoning as uDepotDirectoryMap<RT>::grow(), documented there and in
+	// docs/TODO-grow-race.md.
+	dir_ref_m.rwpflock.write_wait_readers();
+
 	// switch old directory to read only mode
 	for (auto &dme : (*old_dir)) {
 		const int err = mprotect(dme.mm_region, dme.size_b, PROT_READ);
@@ -221,7 +227,7 @@ uDepotDirMapOR<RT>::grow(const u64 seg_size, const u64 grain_size)
 		}
 	}
 
-	dir_ref_m.rwpflock.write_wait_readers();
+	// readers were already drained before the protection changes above
 
 	// nobody should be holding a reference to old_dir anymore
 	for (auto &dme : (*old_dir)) {
