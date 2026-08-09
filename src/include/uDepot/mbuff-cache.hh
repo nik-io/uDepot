@@ -14,6 +14,7 @@
 
 #include <deque>
 #include <array>
+#include <mutex>
 #include <typeindex>
 
 #include "uDepot/mbuff.hh"
@@ -28,7 +29,23 @@ public:
 	virtual void mb_put(Mbuff *mb) = 0;
 };
 
-template<typename LockTy, size_t N = 128>
+// The caches below are guarded by a plain std::mutex, deliberately, and not by
+// RT::LockTy.
+//
+// RT::LockTy is a uDepotLock, whose lock() returns a trt::CoroTask: it is built
+// for critical sections that may need to suspend a TRT task. These critical
+// sections cannot. Each one is a push or a pop on a std::deque -- a handful of
+// instructions with no I/O and no suspension point -- so there is nothing for a
+// suspending lock to buy.
+//
+// Using one here would be actively harmful. mb_get()/mb_put() are ordinary
+// functions, so they cannot co_await; the only way to drive a uDepotLock from
+// them is lock_blocking(), and TrtLock::lock_blocking() spins on sched_yield().
+// sched_yield() yields the OS thread, not the TRT task, so if the lock holder
+// is another task on the same scheduler thread it can never run and the spin
+// never ends. A std::mutex removes the question: no coloring, no CoroTask to
+// discard, no deadlock. See docs/concurrent-get-fix.md.
+template<size_t N = 128>
 class MbuffCache : public MbuffCacheBase {
 public:
 	MbuffCache()                       = delete;
@@ -51,7 +68,7 @@ public:
 	Mbuff *mb_get(void) {
 		unsigned tid = ThreadId::get();
 		Mbuff *ret;
-		LockTy *lock;
+		std::mutex *lock;
 		std::deque<Mbuff *> *cache;
 
 		if (tid < mbuff_thread_caches_m.size()) {
@@ -65,7 +82,7 @@ public:
 		}
 
 		if (lock)
-			lock->lock_blocking();
+			lock->lock();
 
 		// if nothing in cache try to allocate
 		if (cache->size() == 0) {
@@ -86,7 +103,7 @@ public:
 	//  This will call ->reslice(0) on the Mbuff.
 	void mb_put(Mbuff *mb) {
 		unsigned tid = ThreadId::get();
-		LockTy *lock;
+		std::mutex *lock;
 		std::deque<Mbuff *> *cache;
 
 		mb->reslice(0);
@@ -102,7 +119,7 @@ public:
 		}
 
 		if (lock)
-			lock->lock_blocking();
+			lock->lock();
 
 		try {
 			cache->push_front(mb);
@@ -127,7 +144,7 @@ private:
 	// The buffers in the mbuff will are freed in the destructor.
 	Mbuff *mb_alloc(void) {
 		Mbuff *ret;
-		mbuff_cache_lock_m.lock_blocking();
+		mbuff_cache_lock_m.lock();
 		try {
 			std::type_index tyidx = mb_alloc_m.mbuff_type_index();
 			mbuff_cache_m.emplace_back(tyidx);
@@ -143,11 +160,11 @@ private:
 	// keep the mbuffs we cache elsewhere (typically in TLS pointers) here so
 	// that we can free their buffers when we are done.
 	std::deque<Mbuff>                  mbuff_cache_m;
-	LockTy                mbuff_cache_lock_m;
+	std::mutex                         mbuff_cache_lock_m;
 
 	std::array<std::deque<Mbuff *>, N> mbuff_thread_caches_m;
 	std::deque<Mbuff *>                mbuff_shared_cache_m;
-	LockTy                             mbuff_shared_cache_lock_m;
+	std::mutex                         mbuff_shared_cache_lock_m;
 
 	MbuffAllocIface                   &mb_alloc_m;
 };

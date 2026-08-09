@@ -99,7 +99,7 @@ private:
 static thread_local bool t_initialized_g = false;
 // server interface
 KV_MbuffInterface *kv_g(nullptr);
-MbuffCache<TrtLock> *mb_cache_g(nullptr);
+MbuffCache<> *mb_cache_g(nullptr);
 MemcacheTrtServer *srv_g(nullptr);
 // pool for task arguments
 static thread_local std::unique_ptr<ArgPool<McTaskArg>> McTaskArgPool_g(nullptr);
@@ -314,7 +314,7 @@ MemcacheTrtServer::MemcacheTrtServer(MemcacheTrtNet &net, KV_MbuffInterface &srv
 	assert(kv_g == nullptr);
 	kv_g = &srv_kv_m;
 	assert(mb_cache_g == nullptr);
-	mb_cache_g = new MbuffCache<TrtLock> (*kv_g);
+	mb_cache_g = new MbuffCache<> (*kv_g);
 	assert(srv_g == nullptr);
         srv_g = this;
 }

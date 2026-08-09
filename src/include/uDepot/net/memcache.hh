@@ -89,7 +89,7 @@ public:
 
 private:
 	KV_MbuffInterface  &srv_kv_mbuff_m;
-	MbuffCache<PthreadLock>mb_cache_m;
+	MbuffCache<>mb_cache_m;
 	Mbuff              srv_mbuff1_m;
 	Mbuff              srv_mbuff2_m;
 	Conf               srv_conf_m;

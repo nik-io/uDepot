@@ -335,8 +335,6 @@ udepot_all_SRC = $(udepot_SRC)                     \
                  test/uDepot/io-helpers.cc         \
                  test/uDepot/concurrent-get-test.cc \
                  bench/io_layer_bench.cc           \
-                 src/uDepot/lsa/udepot-dir-map-or.cc \
-                 test/uDepot/uDepotDirMapORTest.cc \
                  python/wrapper/pyudepot.cc \
 
 udepot_all_DEP = $(patsubst %.cc, .deps/%.d, ${udepot_all_SRC})
@@ -359,8 +357,15 @@ test/uDepot/memcache/udepot-memcache-test: $(LIBTRT_OBJ) $(udepot_memcache_test_
 test/uDepot/udepot-utests: $(LIBTRT_OBJ) $(udepot_utests_OBJ) $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB) Makefile
 	$(CXX) $(LDFLAGS) $(udepot_utests_OBJ) $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBTRT_OBJ) $(LIBS) -o $@
 
-test/uDepot/uDepotDirMapORTest: $(LIBUDEPOT) src/uDepot/lsa/udepot-dir-map-or.o test/uDepot/uDepotDirMapORTest.o Makefile
-	$(CXX) $(LDFLAGS) src/uDepot/lsa/udepot-dir-map-or.o test/uDepot/uDepotDirMapORTest.o $(LIBUDEPOT) $(LIBS) -o $@
+# uDepotDirMapOR is an experimental alternative directory map. It is excluded
+# from the build on purpose: it does not compile ('udepot_io_m' was not
+# declared in this scope, plus -Werror format warnings), and it has been that
+# way independently of any recent change. Keeping a target that cannot build
+# only produces noise -- dependency generation over a broken source, and a
+# tempting `make` target that always fails.
+#
+# It is excluded, not deleted: the source stays in the tree so the approach is
+# not lost. See docs/TODO-dir-map-or.md before reviving it.
 
 test/uDepot/udepot-net-ubench: $(LIBTRT_OBJ) $(udepot_net_ubench_OBJ) $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
 	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
