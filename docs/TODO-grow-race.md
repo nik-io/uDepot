@@ -181,6 +181,42 @@ CI runs — reported success while this segfaulted on every run. That is fixed:
 failures now propagate, and this test is quarantined explicitly rather than
 being swallowed along with everything else.
 
+## The rwlock_pagefault test now exists, and the rollback still works
+
+`test/rwlock-pagefault/resizable_table` — the example the header pointed at,
+which had no source in this repo — is now written and runs in `make run_tests`.
+It resizes an mmap'd table under concurrent readers, in both orderings uDepot
+has used.
+
+| ordering | rollback | result |
+|---|---|---|
+| drain-first (what `grow()` does today) | none | 0 faults, 0 bad values |
+| protect-first (the original design) | `rd_execute__` | 3–13 rollbacks, 0 bad values |
+| drain-first | `rd_execute__` | 0 faults, 0 bad values |
+
+**The mechanism the migration abandoned is not broken.** Driven from an
+ordinary function, `rd_execute__` catches the fault, rolls back, retries, and
+returns correct data every time. What made it unusable was the *caller*
+becoming a coroutine, not the rollback itself. So restoring it for the grow
+path is viable if that path is kept non-coroutine — which is worth weighing
+against the `co_await` conversion that hangs (above).
+
+The protect-first case pins readers inside the protected window with an atomic
+handshake rather than hoping the timing lands. An earlier version relied on
+luck and reported 0 rollbacks — passing while exercising nothing, which is the
+failure mode this whole document exists because of. The test now fails if no
+rollback occurs.
+
+### A fault without the rollback does not crash cleanly
+
+Worth knowing before reading a crash report from the grow path. With
+`rwlpf_rb__.rb_set` at 0, `sigsegv_handler` chains to `oldact_g.sa_sigaction`.
+Once the process has installed the handler, that previous disposition *is* the
+handler, so a fault recurses into it until the stack is gone. The process hangs
+rather than terminating — it does not even respond to `alarm()`. A grow-path
+fault may therefore present as a hang, not a segfault, which is a different
+thing to look for.
+
 ## The missing rwlock_pagefault test
 
 `make run_tests` invoked `test/rwlock-pagefault/resizable_table` — the very

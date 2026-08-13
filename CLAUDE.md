@@ -69,6 +69,12 @@ Follow the [Google C++ Style Guide](https://google.github.io/styleguide/cppguide
 - Non-SPDK tests must always pass: `make clean && make` with default flags
 - Do not merge code that breaks the non-SPDK build
 
+`test/rwlock-pagefault/resizable_table` covers `rwlock_pagefault`, the
+page-fault rollback the grow path depends on. It resizes an mmap'd table under
+concurrent readers in both orderings uDepot has used, and asserts a rollback
+actually fired — an earlier version relied on timing luck and reported zero
+rollbacks, passing while exercising nothing. See `docs/TODO-grow-race.md`.
+
 **A failing test must fail the build.** `do_run_test` used to print `FAILURE.`
 and then exit 0, so `make run_tests` — which CI runs — reported success while
 `bin/udepot-test` segfaulted on *every* run of `udepot-grow-test`. It now
