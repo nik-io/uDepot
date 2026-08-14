@@ -244,8 +244,19 @@ uDepotDirectoryMap<RT>::grow()
 	//
 	// So do not let readers see a protected table at all: block new ones
 	// (write_enter, above), wait for the in-flight ones to leave, and only
-	// then change protections. Costs the reader/copy overlap, which has been
-	// worth negative since the migration. See docs/TODO-grow-race.md.
+	// then change protections.
+	//
+	// This is a stopgap, and it deviates from the intended design: readers are
+	// meant to be blocked as little as possible, which is why the wait used to
+	// be here-but-later. Note what it actually costs, though. write_enter()
+	// already makes rd_try_lock() fail for every *new* reader, and rd_enter()
+	// futex-waits, so new readers were blocked for the whole copy either way;
+	// the late wait bought overlap only for readers already in flight.
+	//
+	// The end state is deferred reclaim of retired directories, so the old and
+	// new tables can coexist and readers can leave this lock entirely. That is
+	// blocked on grow() unmapping the old tables inline, below, which it has
+	// always done. See docs/TODO-grow-race.md, "What the design intends".
 	dir_ref_m.rwpflock.write_wait_readers();
 
 	// switch old directory to read only mode
@@ -329,7 +340,14 @@ uDepotDirectoryMap<RT>::grow()
 
 	// readers were already drained before the protection changes above
 
-	// nobody should be holding a reference to old_dir anymore
+	// Nobody should be holding a reference to old_dir anymore -- which is true
+	// only because the write lock has excluded readers since write_enter().
+	//
+	// The design intends the old and new tables to coexist here, with the old
+	// one reclaimed lazily once no reader can still reach it. Unmapping it
+	// inline is what forces the lock to cover the whole grow, and is therefore
+	// the thing to change first if the stall matters. It has always been this
+	// way; see docs/TODO-grow-race.md, "What the design intends".
 	for (auto &dme : (*old_dir)) {
 		// unmap region
 		const int err = udepot_io_m.munmap(dme.mm_region, dme.size_b);

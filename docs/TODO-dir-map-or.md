@@ -49,10 +49,15 @@ The source and its test stay in the tree so the approach is not lost.
    - the reader-drain ordering around `mprotect`, which
      `uDepotDirectoryMap<RT>::grow()` now does before changing protection bits
      rather than after the copy.
-3. **Decide what it is for.** The shadow directory is only worth its complexity
-   if it removes the grow stall that the supported implementation now has —
-   readers are drained for the whole copy. If that stall matters, this is the
-   design that addresses it, and that is the argument for making it supported.
+3. **Decide what it is for.** The shadow directory is the partially-implemented
+   half of *gradual growth* — copying part of the table at a time, the
+   improvement discussed in the uDepot paper — which is how the grow stall is
+   meant to go away. That is a real argument for making it supported.
+
+   But it is the second step, not the first. Gradual growth still cannot let
+   the old and new tables coexist while `grow()` unmaps the old tables inline,
+   which both implementations do. Deferred reclaim of retired directories has
+   to land first. See `docs/TODO-grow-race.md`, "What the design intends".
 
 ## Related
 

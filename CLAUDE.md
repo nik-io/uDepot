@@ -53,7 +53,21 @@ These are foundational constraints. Every change must preserve them.
   table — `ENODATA` for keys that were written, with the index still in bounds
   so nothing asserted (`docs/TODO-grow-race.md`). `hash_to_map()` now derives
   the width from the directory it just loaded. Anything else `grow()` publishes
-  belongs inside the write lock, in one place.
+  belongs inside the write lock, in one place. This is a prerequisite for the
+  design below, not just a bug fix: a directory snapshot has to describe its
+  own geometry before a reader can be allowed to outlive the swap.
+- **The grow path is a stopgap, and knowingly so.** The design is: `grow()` is
+  single-writer (`grow_lock_m` — working as intended); the old and new tables
+  *coexist* while references to the old one are outstanding, with the old one
+  reclaimed lazily; and readers are blocked as little as possible. The code
+  does none of the last two — `grow()` unmaps the old tables inline, which is
+  why the write lock has to span the whole operation, and draining readers
+  before `mprotect` was the only way to stop a crash once the page-fault
+  rollback became unusable under coroutines. Deferred reclaim of retired
+  directories comes first, then gradual per-table growth (the uDepot paper's
+  improvement; `uDepotDirMapOR`'s shadow directory is the started half). Do not
+  "simplify" the grow path on the assumption that the current stall is
+  intended. See `docs/TODO-grow-race.md`, "What the design intends".
 - **I/O backends**: Located in `src/uDepot/io/`. Each backend implements `uDepotIO_` interface. SPDK backends require DMA-safe buffers for NVMe commands.
 - **SpdkQpair**: Per-thread NVMe queue pair. `read_sync`/`write_sync` handle DMA buffer allocation internally. `read_raw_sync`/`write_raw_sync` expect pre-allocated DMA buffers.
 - **Python bindings**: `pyudepot` via ctypes in `src/uDepot/net/py-udepot.cc`. Shared library built as `libpyudepot.so`.

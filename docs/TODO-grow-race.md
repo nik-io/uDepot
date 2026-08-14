@@ -69,7 +69,7 @@ siglongjmp(rwlpf_rb__.rb_jmp, 1);                             // never reached
 The fault stopped being recoverable and became a crash. Nothing warned, because
 removing the last caller of a template is not an error.
 
-### The fix
+### The fix — and it is a deliberate deviation from the design
 
 Readers are drained *before* the protection bits change, so no reader is ever
 inside a table that is `PROT_READ`/`PROT_NONE` and no fault can occur.
@@ -78,12 +78,96 @@ This matters because `RWLock::wr_enter()` is **non-blocking** — it subtracts
 `RWLOCK_BIAS`, which makes `rd_try_lock()` fail for *new* readers, and returns
 immediately. In-flight readers were still inside when `mprotect` ran. That is
 precisely the window the rollback used to cover. `write_wait_readers()` polls
-`wr_ready()` (`rwlock_ == 0`) until they leave.
+`wr_ready()` (`rwlock_ == 0`) until they leave. Neither `grow()` call site runs
+while holding the read lock, so draining cannot deadlock.
 
-Cost: the copy no longer overlaps with readers, so a grow is a full stall. That
-overlap is what the page-fault design bought, and it has been worth negative
-since the migration — it crashed instead. Neither `grow()` call site runs while
-holding the read lock, so draining cannot deadlock.
+**This trades away reader concurrency that the design intends to keep.** See
+"What the design intends" below before treating it as settled. It is a stopgap
+that stops a crash; it is not the end state.
+
+Be precise about what it costs, though, because it is less than it looks and
+the intent was already not being met:
+
+`write_enter()` sits before the copy in both the original and current code, and
+it makes `rd_try_lock()` fail for every *new* reader, which then futex-waits in
+`rd_enter()`. So new readers were blocked for the whole copy either way. The
+late `write_wait_readers()` bought overlap only for readers **already in
+flight** at the instant `write_enter()` ran. The drain removed that narrow
+overlap. It did not introduce the reader blocking — `write_enter()` did.
+
+## What the design intends, and how far the code is from it
+
+Recorded from the author, because none of it is visible in the code and two of
+the three were being contradicted by comments in this file.
+
+1. **`grow()` is single-writer by design.** `grow_lock_m`, plus the
+   `old_dir != dir_ref_m.directory.load()` recheck that turns a lost race into
+   `EAGAIN`, is that guard. Working as intended — not something to redesign.
+   What the coroutine experiment below found is narrower than it first read:
+   making the guard *real* (it was a discarded `CoroTask`, so the lock had
+   never been held) surfaced a re-entrancy in the grow logic that had been
+   harmless while the lock did nothing.
+2. **The old and new tables are meant to coexist** while references to the old
+   one are still outstanding, with the old one reclaimed lazily.
+3. **Blocking readers as little as possible is the point**, which is why the
+   original code waits for readers late rather than at `write_enter()`.
+
+### Point 2 is not implemented at all
+
+`grow()` destroys the old tables *inside* the write lock, before the swap:
+
+```cpp
+mprotect(dme.mm_region, dme.size_b, PROT_NONE);
+udepot_io_m.munmap(dme.mm_region, dme.size_b);   // old tables gone here
+salsa::SalsaCtlr::invalidate_grains(...);
+dir_ref_m.directory = new_dir;                   // swap only after
+...
+delete old_dir;
+```
+
+There is no grace period, no reference count, no deferred reclaim. The two
+tables never coexist and nothing is freed lazily. **This predates all the
+recent lock and grow work** — it is the original shape, in both
+`uDepotDirectoryMap` and `uDepotDirMapOR`.
+
+It is also *why* the write lock has to cover the whole operation: with the old
+mapping being unmapped inline, the lock is the only thing keeping readers off
+memory that is about to disappear. Reader concurrency cannot be restored while
+this stands, whatever the lock does.
+
+### What restoring the intent takes
+
+The hard part is writers, not readers.
+
+- **Readers** on an old-directory snapshot need no protection at all, only
+  somewhere for the old mapping to live until they leave. `mprotect` +
+  rollback existed to catch **writes** to the old table after the copy had
+  passed that slot — the header is explicit that reads are the easy half and
+  writes "would need some kind of log".
+- The rollback cannot come back on the coroutine path: `sigsetjmp` cannot span
+  a `co_await` (see bug 1).
+
+So, in order:
+
+1. **Deferred reclaim of retired directories** (epoch- or RCU-style). Retire
+   instead of `munmap`; free once no reader can still hold the pointer. This is
+   point 2, and it is what lets readers leave the write lock entirely. No
+   faults, so no rollback needed.
+2. **Gradual growth** — copy one old table at a time, so only that table's
+   writers stall, and only for one table's copy. This is the improvement
+   discussed in the uDepot paper; `uDepotDirMapOR`'s shadow directory
+   (`alloc_shadow()`) is the partially-implemented piece. See
+   `docs/TODO-dir-map-or.md` — it currently does not compile.
+
+Ordering matters: gradual growth without deferred reclaim still cannot let the
+two tables coexist, so it would not remove the stall on its own.
+
+The bug-2 fix below is a **prerequisite** for step 1, not a conflict with it.
+Once a reader holds a snapshot of the old directory while the new one is
+published, an index width kept in a separate `grow_nr_m` is read against the
+wrong directory by construction — the same wrong-table bug, permanently rather
+than in a window. Deriving the width from the snapshot pointer is what makes a
+snapshot self-describing.
 
 ## Bug 2: the new directory and its index width were published separately
 
@@ -190,6 +274,11 @@ Note what this implies regardless of the coroutine conversion: **`grow_lock_m`
 had not actually been held since the migration** — it was a discarded
 `CoroTask` until `lock_blocking()` was added — so the code under it had never
 run with the lock genuinely taken. Making the lock real is what surfaced this.
+
+To be clear about what that does and does not mean: single-writer grow is the
+intended design and is not in question. The finding is that the grow logic has
+a re-entrancy or lost-unlock path that was harmless while the guard was a
+no-op, and becomes a deadlock once the guard is real.
 
 Caveat on the owner evidence: glibc does not reliably maintain `__owner` for
 default-type mutexes, so "the owner is waiting on itself" is a strong hint
