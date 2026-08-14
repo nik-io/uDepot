@@ -9,6 +9,25 @@
    something so it cannot recur: a test that catches it, a default that makes
    it impossible, a check in the build, or a documented rule. A fix that only
    repairs the current instance is not finished.
+4. **Never compromise a design choice to fix a bug.** The design properties in
+   this file and in `docs/` are constraints on the fix, not variables the fix
+   may spend. If the only way you can see to stop a crash or a data loss is to
+   give up a documented property — reader concurrency, zero copy, the absence
+   of a global lock, an amplification bound — that is a signal your fix is
+   wrong, not that the property is negotiable. Look for one that holds the
+   property.
+
+   If you conclude the design choice itself is wrong, **stop and ask for
+   explicit consent before changing it.** Say which property, what evidence
+   makes you think it is wrong, and what the change costs. Wait for an answer.
+
+   Shipping the compromise and describing it in a doc afterwards is not
+   consent, and neither is a commit message. That is exactly what happened to
+   the grow path: the reader drain traded away concurrency the design is built
+   around, and this file went on to assert that the overlap "has been worth
+   negative" — an agent's opinion, written down as if it were the project's
+   position. If a stopgap genuinely cannot wait, say plainly that it is a
+   stopgap, say what it costs, and ask.
 
 ## Commit Attribution
 
