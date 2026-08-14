@@ -119,10 +119,34 @@ public:
 		return (hh) >> (UDEPOT_SALSA_KEYTAG_BITS + map_entry_nr_bits_m - dir_idx_bits);
 	}
 
+	// Number of hash bits that select a table within @dir. The directory
+	// doubles on every grow, so this is floor(log2(size)) -- exactly what
+	// grow_nr_m - 1 counts.
+	static u32 dir_idx_bits_(const std::vector<DirMapEntry> *const dir) {
+		const size_t n = dir->size();
+		assert(0 < n);
+		return 63U - static_cast<u32>(__builtin_clzl(n));
+	}
+
+	// Derive the index width from the directory itself rather than from
+	// grow_nr_m.
+	//
+	// This used to be hash_to_dir_idx_(h, grow_nr_m - 1), which meant every
+	// lookup read two independently-updated fields and needed them to agree.
+	// They did not: grow() published the new directory inside the write lock
+	// but incremented grow_nr_m after write_exit(), so readers ran for a
+	// window against a 2x larger directory with the old width and hashed one
+	// bit short. Puts landing in that window went to the wrong table and were
+	// never found again.
+	//
+	// Taking the width from the directory pointer makes the pair a single
+	// atomic load: there is nothing left to keep in sync, so that class of bug
+	// cannot be reintroduced by moving a statement.
 	uDepotMap<RT> *hash_to_map(const u64 h) {
 		std::vector<DirMapEntry> *const directory = dir_ref_m.directory.load(std::memory_order_relaxed);
 		assert(nullptr != directory);
-		const u64 idx = hash_to_dir_idx_(h, grow_nr_m - 1);
+		const u64 idx = hash_to_dir_idx_(h, dir_idx_bits_(directory));
+		assert(idx < directory->size());
 		return &((*directory)[idx]).map;
 	}
 private:

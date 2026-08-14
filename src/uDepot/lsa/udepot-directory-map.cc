@@ -271,7 +271,7 @@ uDepotDirectoryMap<RT>::grow()
 				if (!p->used())
 					continue;
 				const u64 h = map.entry_keyfp(p);
-				const u32 idx = hash_to_dir_idx_(h, grow_nr_m);
+				const u32 idx = hash_to_dir_idx_(h, dir_idx_bits_(new_dir));
 				HashEntry *trgt = nullptr;
 				int rc = trgts[idx]->lookup(h, &trgt);
 				switch (rc) {
@@ -312,7 +312,7 @@ uDepotDirectoryMap<RT>::grow()
 			if (!p->used())
 				continue;
 			const u64 h = map.entry_keyfp(p);
-			const u32 idx = hash_to_dir_idx_(h, grow_nr_m);
+			const u32 idx = hash_to_dir_idx_(h, dir_idx_bits_(new_dir));
 			assert(nullptr != (*new_dir)[idx].map.lookup(h, p->pba));
 		}
 	}
@@ -342,8 +342,30 @@ uDepotDirectoryMap<RT>::grow()
 		salsa::SalsaCtlr::invalidate_grains(dme.grain_offset, dme.size_b / grain_size, false);
 	}
 
-	// point to new directory
+	// Publish the new directory, and count the grow, while the write lock
+	// still excludes readers.
+	//
+	// hash_to_map() used to read *both* dir_ref_m.directory and grow_nr_m:
+	//
+	//     idx = hash_to_dir_idx_(h, grow_nr_m - 1);
+	//     return &((*directory)[idx]).map;
+	//
+	// and grow_nr_m++ lived after write_exit(). That left a window where
+	// readers ran against the new (2x larger) directory while still using the
+	// old index width, so every key whose new index is >= old_dir->size()
+	// hashed one bit short: a put in that window inserted into
+	// new_dir[idx_old] and every later get, computing new_dir[idx_new],
+	// missed it -- ENODATA for a key that was written.
+	//
+	// hash_to_map() now derives the width from the directory it just loaded,
+	// so the two can no longer disagree. Keeping the increment here as well is
+	// belt and braces: grow_nr_m is a plain u32 read by ~uDepotDirectoryMap
+	// and by nothing on the hot path, and there is no reason to publish it
+	// outside the lock. It must stay after the copy loop and after the
+	// munmap/invalidate_grains loop, which can re-enter the map while
+	// dir_ref_m.directory still names the old directory.
 	dir_ref_m.directory = new_dir;
+	grow_nr_m++;
 
 	dir_ref_m.rwpflock.write_exit();
 
@@ -357,7 +379,6 @@ uDepotDirectoryMap<RT>::grow()
 		hdr->idx = i;
 		hdr->csum = md_m.checksum32(hdr->ts, (const u8*) &hdr->dir_size, sizeof(hdr->dir_size) + sizeof(hdr->idx));
 	}
-	grow_nr_m++;
 	grow_lock_m.unlock();
 
 	delete old_dir;

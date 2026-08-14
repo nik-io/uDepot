@@ -46,6 +46,14 @@ These are foundational constraints. Every change must preserve them.
 
 - **TRT (Task Runtime)**: Coroutine-based cooperative scheduler in `trt/`. All task functions return `trt::CoroTask`. Use `co_await`/`co_return` — never legacy jctx yield.
 - **Never discard a `trt::CoroTask`.** `initial_suspend()` is `suspend_always`, so calling a `CoroTask` function only builds the frame — the body does not run until something resumes it. A discarded `CoroTask` is a silent no-op plus a leaked frame, not a completed call. `CoroTask` is `[[nodiscard]]` and the build uses `-Werror`, so this is now a compile error; do not silence it with a cast to `void`. This is not hypothetical: `uDepotLock::lock()` returns `CoroTask`, and six call sites discarded it, leaving the shared Mbuff cache and the directory-grow path completely unlocked (`docs/concurrent-get-fix.md`). **From a non-coroutine, call `lock_blocking()`; from a coroutine, `co_await lock()`.**
+- **Never split the directory map's identity across two variables.** A lookup
+  picks its table from `dir_ref_m.directory` *and* the number of index bits.
+  Those were separate fields, published by `grow()` on either side of
+  `write_exit()`, and the window between them silently routed puts to the wrong
+  table — `ENODATA` for keys that were written, with the index still in bounds
+  so nothing asserted (`docs/TODO-grow-race.md`). `hash_to_map()` now derives
+  the width from the directory it just loaded. Anything else `grow()` publishes
+  belongs inside the write lock, in one place.
 - **I/O backends**: Located in `src/uDepot/io/`. Each backend implements `uDepotIO_` interface. SPDK backends require DMA-safe buffers for NVMe commands.
 - **SpdkQpair**: Per-thread NVMe queue pair. `read_sync`/`write_sync` handle DMA buffer allocation internally. `read_raw_sync`/`write_raw_sync` expect pre-allocated DMA buffers.
 - **Python bindings**: `pyudepot` via ctypes in `src/uDepot/net/py-udepot.cc`. Shared library built as `libpyudepot.so`.
@@ -70,18 +78,21 @@ Follow the [Google C++ Style Guide](https://google.github.io/styleguide/cppguide
 - Do not merge code that breaks the non-SPDK build
 
 `test/rwlock-pagefault/resizable_table` covers `rwlock_pagefault`, the
-page-fault rollback the grow path depends on. It resizes an mmap'd table under
-concurrent readers in both orderings uDepot has used, and asserts a rollback
-actually fired — an earlier version relied on timing luck and reported zero
-rollbacks, passing while exercising nothing. See `docs/TODO-grow-race.md`.
+page-fault rollback the grow path used to depend on — `grow()` drains readers
+instead now, but `rd_execute__` is still the fallback if the stall ever needs
+removing. It resizes an mmap'd table under concurrent readers in both orderings
+uDepot has used, and asserts a rollback actually fired — an earlier version
+relied on timing luck and reported zero rollbacks, passing while exercising
+nothing. See `docs/TODO-grow-race.md`.
 
 **A failing test must fail the build.** `do_run_test` used to print `FAILURE.`
 and then exit 0, so `make run_tests` — which CI runs — reported success while
 `bin/udepot-test` segfaulted on *every* run of `udepot-grow-test`. It now
 propagates the exit status. If a test is genuinely known-broken, quarantine it
-explicitly with `do_run_known_failing_test` and a tracking document (see
-`docs/TODO-grow-race.md`) so it stays visible; never make failure silent for
-every test to accommodate one.
+explicitly with `do_run_known_failing_test` and a tracking document so it stays
+visible; never make failure silent for every test to accommodate one.
+`udepot-grow-test` was its one user and is un-quarantined now that the grow
+race is fixed, so the macro currently has none — keep it anyway.
 
 ### Performance tests
 

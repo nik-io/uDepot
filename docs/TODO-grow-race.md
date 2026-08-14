@@ -1,31 +1,30 @@
-# Concurrent directory-map grow: crash fixed, data loss still open
+# Concurrent directory-map grow: fixed
 
 ## Status
 
-**Partly fixed. Still quarantined.** The SIGSEGV is fixed (root cause below).
-`udepot-grow-test` now fails a different way — a `get()` returns `ENODATA` for
-a key that was written — so it stays quarantined via
-`do_run_known_failing_test`. It is not flaky; it fails every run.
+**Fixed and un-quarantined.** `udepot-grow-test` runs under `do_run_test` in
+`make run_tests` again. Two independent bugs had to go:
 
-| | before | after the drain fix |
-|---|---|---|
-| `-t 17 --thin` | SIGSEGV (139), 3/3 | no segfault, 4/4 |
-| `-t 23 --thin` | SIGSEGV/abort | no segfault, 4/4 |
-| both | — | abort (134): `get returned 61` |
+1. the C++20 coroutine migration dropped the page-fault rollback the grow path
+   depended on — that was the SIGSEGV;
+2. `grow()` published the new directory and its index width as two separate
+   stores, one inside the write lock and one outside — that was the `ENODATA`.
 
-**Whether the remaining `ENODATA` is pre-existing or was introduced by the
-drain change is not established.** The segfault previously killed the run
-before the read-back could happen, so there was no opportunity to observe it.
-Do not assume either way without measuring.
+| | at the start | after the drain fix | after the publish fix |
+|---|---|---|---|
+| `-t 17 --thin` | SIGSEGV (139), 3/3 | abort (134): `get returned 61` | pass, 10/10 |
+| `-t 23 --thin` | SIGSEGV/abort | abort (134) | pass, 10/10 |
 
-## Root cause of the crash: the coroutine migration dropped the rollback
+The document below keeps both diagnoses, because both mechanisms are things
+this codebase can grow again.
+
+## Bug 1: the coroutine migration dropped the rollback
 
 `rwlock_pagefault` is not an ordinary rwlock. Its read side is protected by a
 SIGSEGV handler plus `sigsetjmp`/`siglongjmp`: during a grow the old table is
 `mprotect`ed `PROT_READ` and then `PROT_NONE`, and an in-flight reader that
 touches it faults, longjmps out, and **retries the whole operation**. The
-header says so, and points at an example test that has never existed in this
-repo:
+header says so, and pointed at an example test that had no source in this repo:
 
 ```
  * The code here implements (1) by mapping the table RO during the copy, and
@@ -34,8 +33,8 @@ repo:
  * see test/rwlock-pagefault/resizable_table for an example
 ```
 
-The rollback lived in `rwlock_pagefault::rd_execute__`, which is the only thing
-that ever set `rwlpf_rb__.rb_set = 1`. Before the C++20 migration,
+The rollback lived in `rwlock_pagefault::rd_execute__`, the only thing that
+ever set `rwlpf_rb__.rb_set = 1`. Before the C++20 migration,
 `uDepotSalsa::local_op_execute` drove every operation through it, passing
 `prepare`/`rollback`/`finalize` handlers.
 
@@ -57,8 +56,8 @@ already spelled out that constraint — *"we can only push into the stack, never
 pop, because our checkpoint (that includes a point in the stack) might become
 invalid."* Coroutines violate it by construction.
 
-`rd_execute__` has had **no callers** since. So `rwlpf_rb__.rb_set` is
-permanently 0, and `sigsegv_handler` always takes the branch that chains to the
+`rd_execute__` has had **no callers** since, so `rwlpf_rb__.rb_set` is
+permanently 0 and `sigsegv_handler` always takes the branch that chains to the
 previous handler:
 
 ```cpp
@@ -70,10 +69,10 @@ siglongjmp(rwlpf_rb__.rb_jmp, 1);                             // never reached
 The fault stopped being recoverable and became a crash. Nothing warned, because
 removing the last caller of a template is not an error.
 
-## The fix applied
+### The fix
 
-Readers are now drained *before* the protection bits change, so no reader is
-ever inside a table that is `PROT_READ`/`PROT_NONE` and no fault can occur.
+Readers are drained *before* the protection bits change, so no reader is ever
+inside a table that is `PROT_READ`/`PROT_NONE` and no fault can occur.
 
 This matters because `RWLock::wr_enter()` is **non-blocking** — it subtracts
 `RWLOCK_BIAS`, which makes `rd_try_lock()` fail for *new* readers, and returns
@@ -81,112 +80,146 @@ immediately. In-flight readers were still inside when `mprotect` ran. That is
 precisely the window the rollback used to cover. `write_wait_readers()` polls
 `wr_ready()` (`rwlock_ == 0`) until they leave.
 
-Cost: the copy no longer overlaps with readers, so a grow is now a full stall.
-That overlap is what the page-fault design bought, and it has been worth
-negative since the migration — it crashed instead. Neither `grow()` call site
-runs while holding the read lock, so draining cannot deadlock.
+Cost: the copy no longer overlaps with readers, so a grow is a full stall. That
+overlap is what the page-fault design bought, and it has been worth negative
+since the migration — it crashed instead. Neither `grow()` call site runs while
+holding the read lock, so draining cannot deadlock.
 
-## Still open: `ENODATA` after a grow
+## Bug 2: the new directory and its index width were published separately
 
-With the crash gone, both invocations now fail here instead:
+With the crash gone, both invocations failed here instead:
 
 ```
 test/uDepot/udepot-test.cc:302: get_test_thin() get returned 61 vale=... valret=...
 udepot-test: test/uDepot/udepot-test.cc:303: get_test_thin: Assertion `0' failed.
 ```
 
-61 is `ENODATA`: a key the test wrote is not found on read-back. That is a
-correctness bug, not a crash, and it is the reason the test stays quarantined.
+61 is `ENODATA`: a key the test wrote is not found on read-back.
 
-Ruled out so far:
+`hash_to_map()` read two independently-updated fields and needed them to agree:
 
-- **Not the GC relocation path.** `uDepotSalsa::gc_callback` does take
-  `rwpflock.rd_enter()` around its `local_gc_callback` mutation
-  (`udepot-lsa.cc:721-727`), so it is not mutating a table behind the grow's
-  back.
-- **Not the discarded-lock family.** Those are fixed
-  (`docs/concurrent-get-fix.md`) and a clean `-Werror` build with
-  `[[nodiscard]]` proves no discarded `CoroTask` remains.
+```cpp
+std::vector<DirMapEntry> *const directory = dir_ref_m.directory.load(...);
+const u64 idx = hash_to_dir_idx_(h, grow_nr_m - 1);
+return &((*directory)[idx]).map;
+```
 
-Worth trying next, roughly in order of cost:
+`grow()` stored them in two places:
 
-- Establish whether it predates the drain change. Hard to do directly, since
-  the segfault used to kill the run first; a build with the drain plus the
-  `mprotect` calls removed would at least separate "protection mechanics" from
-  "copy/lookup logic".
-- Audit the copy loop in `uDepotDirectoryMap<RT>::grow()` for entries that are
-  live in the old table but not carried into the new one — particularly
-  `try_shift`ed entries and tombstones (`deleted()`), whose invariants differ
-  from ordinary used entries.
-- Check the retry path in `put_mbuff`: on `ENOSPC` it calls `grow()` and
-  re-runs with `EAGAIN`. Confirm the retry re-derives `udm` from the *new*
-  directory rather than reusing anything cached from before the grow.
+```cpp
+dir_ref_m.directory = new_dir;      // inside the write lock
+dir_ref_m.rwpflock.write_exit();    // readers resume here
+// ... dirmap header writes ...
+grow_nr_m++;                        // outside
+```
+
+Between `write_exit()` and `grow_nr_m++`, readers ran against the new — twice
+as large — directory while still using the *old* index width. Every key whose
+correct new index is `>= old_dir->size()` hashed one bit short. A put in that
+window inserted into `new_dir[idx_old]`; every later get computed
+`new_dir[idx_new]` and missed. The index stayed in bounds throughout, so
+nothing asserted and nothing crashed — the entry was simply in the wrong table.
+
+This is what the instrumentation showed directly, at the `ENODATA` return in
+`lookup_mbuff`:
+
+```
+GETMISS h=7506397764127141955 expect_idx=10 insert_gen=4 cur_gen=5
+```
+
+`insert_gen=4, cur_gen=5` is exactly a put that observed the stale `grow_nr_m`
+while `dir_ref_m.directory` already named the generation-5 directory.
+
+### The fix
+
+`hash_to_map()` now derives the index width from the directory pointer it just
+loaded, rather than from a second variable:
+
+```cpp
+static u32 dir_idx_bits_(const std::vector<DirMapEntry> *const dir) {
+        return 63U - static_cast<u32>(__builtin_clzl(dir->size()));
+}
+```
+
+The directory doubles on every grow, so `floor(log2(size))` is precisely what
+`grow_nr_m - 1` counted. Reading it from the object makes the lookup a single
+atomic load: there is no longer a pair to keep in sync, so moving a statement
+cannot reintroduce this. `grow()`'s copy loop uses the same helper on
+`new_dir` instead of `hash_to_dir_idx_(h, grow_nr_m)`.
+
+`grow_nr_m++` also moved inside the write lock. That is now belt and braces —
+`grow_nr_m` is only read by the destructor's stats line — but there is no
+reason to publish it outside the lock.
+
+### What this cost to find, and what did not find it
+
+Three measurements, in the order they were taken:
+
+1. **`mprotect` compiled out, drain retained** — `ENODATA` reproduced
+   identically. So it was not the protection mechanics, and the drain fix had
+   not caused it.
+2. **Copy-loop accounting** — `src_used == dst_used` at every grow (0, 7615,
+   14968, 29399, 54759), tombstones 0, shifted 0. The copy loses nothing.
+3. **`GETMISS` at the `ENODATA` return** — `insert_gen != cur_gen`, which
+   pointed straight at the two-field read.
+
+Steps 1 and 2 were both negative results, and both were necessary: they are
+what ruled out the two hypotheses this document had recorded as most likely.
 
 ## Attempted and reverted: making grow() a coroutine
 
-`grow_lock_m` is currently taken with `lock_blocking()`. That is correct from
-an ordinary function, but **not** safe from inside a TRT task:
-`TrtLock::lock_blocking()` spins on `sched_yield()`, which yields the OS thread
-and not the task, so if the holder is another task on the same scheduler thread
-it can never run. `grow()` is reachable from `put_mbuff`, which is a task under
-`RuntimeTrt`.
+`grow_lock_m` is taken with `lock_blocking()`. That is correct from an ordinary
+function, but **not** safe from inside a TRT task: `TrtLock::lock_blocking()`
+spins on `sched_yield()`, which yields the OS thread and not the task, so if
+the holder is another task on the same scheduler thread it can never run.
+`grow()` is reachable from `put_mbuff`, which is a task under `RuntimeTrt`.
 
 The obvious fix is to make `grow()` a `trt::CoroTask` and `co_await
 grow_lock_m.lock()`. That was implemented (callers: `put_mbuff` co_awaits;
 `init()` and `try_restore_entry()` drive it with `run_sync()`, both being
 single-threaded) and it **builds clean and hangs**, so it was reverted.
 
-What the hang looks like, on `-t 17 --thin`:
+What the hang looked like, on `-t 17 --thin`:
 
 - CPU time stays at `00:00:00` while elapsed time climbs — sleeping, not slow.
-- All 17 worker threads are blocked in `PthreadLock::lock()` on the **same**
-  mutex.
-- No thread is anywhere in `grow()`, `write_wait_readers()`, or `rd_enter()`.
-- The mutex's `__data.__owner` names a thread that is itself blocked on that
-  same mutex.
+- All 17 worker threads blocked in `PthreadLock::lock()` on the **same** mutex.
+- No thread anywhere in `grow()`, `write_wait_readers()`, or `rd_enter()`.
+- The mutex's `__data.__owner` names a thread itself blocked on that mutex.
 
-So the lock is taken and never released. Note what this implies regardless of
-the coroutine conversion: **`grow_lock_m` has not actually been held since the
-migration** — it was a discarded `CoroTask` until `lock_blocking()` was added —
-so the code under it has never run with the lock genuinely taken. Making the
-lock real is what surfaced this. It is not obviously a bug in the conversion;
-it is more likely a re-entrancy or lost-unlock path in the grow logic that was
-harmless while the lock did nothing.
+Note what this implies regardless of the coroutine conversion: **`grow_lock_m`
+had not actually been held since the migration** — it was a discarded
+`CoroTask` until `lock_blocking()` was added — so the code under it had never
+run with the lock genuinely taken. Making the lock real is what surfaced this.
 
 Caveat on the owner evidence: glibc does not reliably maintain `__owner` for
-default-type mutexes, so "the owner is waiting on itself" should be treated as
-a strong hint rather than proof of self-deadlock. The 17-threads-one-mutex
-observation does not depend on it.
+default-type mutexes, so "the owner is waiting on itself" is a strong hint
+rather than proof. The 17-threads-one-mutex observation does not depend on it.
 
-Worth checking first when picking this up:
+This remains open. It is not currently reachable — `grow()` is only called from
+`put_mbuff`'s `ENOSPC` path and from single-threaded init/restore, and the test
+suite passes — but the hazard is real if a second caller appears. Worth
+checking when picking it up:
 
 - whether `grow()` can be re-entered on one thread — e.g. via
   `salsa::SalsaCtlr::allocate_grains()`'s `do { } while (EAGAIN)` loop
   triggering GC, and GC's `gc_callback` reaching a path that grows;
 - whether any `co_return` path in `grow()` can be reached with the lock held
   (the reverted version unlocked on all three exits, which is why a re-entrancy
-  is the better hypothesis);
-- whether `lock_blocking()` on `grow_lock_m` has the same latent problem and is
-  simply not being hit by the current test, since it is the same lock either
-  way.
+  is the better hypothesis).
 
-Until that is understood, `grow_lock_m` stays on `lock_blocking()`: the test
-fails with an abort rather than hanging, and a hang is worse — it burns a CI
-slot to a timeout and hides everything behind it.
-
-## Why the segfault was never caught by CI
+## Why none of this was caught by CI
 
 `do_run_test` printed `FAILURE.` and then exited 0, so `make run_tests` — which
-CI runs — reported success while this segfaulted on every run. That is fixed:
-failures now propagate, and this test is quarantined explicitly rather than
-being swallowed along with everything else.
+CI runs — reported success while `bin/udepot-test` segfaulted on every run.
+That is fixed: failures propagate. `do_run_known_failing_test` exists for
+genuinely-known-broken tests and currently has no users.
 
-## The rwlock_pagefault test now exists, and the rollback still works
+## The rwlock_pagefault test
 
 `test/rwlock-pagefault/resizable_table` — the example the header pointed at,
-which had no source in this repo — is now written and runs in `make run_tests`.
-It resizes an mmap'd table under concurrent readers, in both orderings uDepot
-has used.
+which had no source in this repo — now exists and runs in `make run_tests`. It
+resizes an mmap'd table under concurrent readers, in both orderings uDepot has
+used.
 
 | ordering | rollback | result |
 |---|---|---|
@@ -197,9 +230,9 @@ has used.
 **The mechanism the migration abandoned is not broken.** Driven from an
 ordinary function, `rd_execute__` catches the fault, rolls back, retries, and
 returns correct data every time. What made it unusable was the *caller*
-becoming a coroutine, not the rollback itself. So restoring it for the grow
-path is viable if that path is kept non-coroutine — which is worth weighing
-against the `co_await` conversion that hangs (above).
+becoming a coroutine. Restoring it for the grow path is viable if that path is
+kept non-coroutine — worth weighing against the `co_await` conversion that
+hangs, if the grow stall ever shows up in a profile.
 
 The protect-first case pins readers inside the protected window with an atomic
 handshake rather than hoping the timing lands. An earlier version relied on
@@ -214,21 +247,12 @@ Worth knowing before reading a crash report from the grow path. With
 Once the process has installed the handler, that previous disposition *is* the
 handler, so a fault recurses into it until the stack is gone. The process hangs
 rather than terminating — it does not even respond to `alarm()`. A grow-path
-fault may therefore present as a hang, not a segfault, which is a different
-thing to look for.
+fault may therefore present as a hang, not a segfault.
 
-## The missing rwlock_pagefault test
-
-`make run_tests` invoked `test/rwlock-pagefault/resizable_table` — the very
-example the `rwlock-pagefault.hh` header points at. That binary has no source,
-no build rule, and no history in this repo: the line came in with the initial
-import and the test never did. Because `do_run_test` swallowed failures, the
-command-not-found reported as a silent non-failure for the life of the repo.
-
-So the component whose rollback the migration removed has never had a test.
-Writing one — a resizable table hammered by concurrent readers across a resize
-— would have caught this regression at the commit that introduced it, and is
-still the best way to pin down what remains.
+This is not hypothetical here: the A/B build used to confirm bug 2 (fix
+reverted, everything else identical) hung after the fifth grow rather than
+aborting with `61`, on the same command line that had aborted every previous
+run.
 
 ## Reproducing
 
@@ -241,4 +265,4 @@ bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 \
 No special hardware. `-t 17` and `--thin` matter: the thin store is what forces
 the grow, and the concurrency is what makes readers be in flight during it. The
 second invocation in `udepot-grow-test` reads the store the first leaves
-behind, so its failure is downstream of the first and not independent evidence.
+behind, so it only tests anything while the first succeeds.

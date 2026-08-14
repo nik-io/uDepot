@@ -469,6 +469,11 @@ do_run_test = echo -n "RUNNING TEST: $(1) ... ";           \
 
 # Same, for a test that is known to fail for a reason already written down.
 # Reports loudly but does not fail the build. $(2) is the tracking document.
+#
+# Currently unused: udepot-grow-test, its only user, was un-quarantined once
+# the grow race was fixed. Kept because it is the documented way to quarantine
+# (see CLAUDE.md) -- the alternative that keeps getting reinvented is making
+# failure silent for every test to accommodate one.
 do_run_known_failing_test =                                       \
               echo -n "RUNNING TEST (known failing): $(1) ... ";   \
               errfile=`mktemp /tmp/udepot-log-XXXX.log`;           \
@@ -490,18 +495,16 @@ udepot-gc-test: $(TESTS)
 	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 262144 --size $$(((1048576+4096)*1024+1)) -w 180000 -r 180000 -t 1 --gc --grain-size 32 --val-size 3072)
 	rm -f /dev/shm/udepot-test
 
-# QUARANTINED: both of these segfault/abort on every run, and did so before
-# any of the recent lock fixes -- verified by building and running the same
-# test at the parent commit. A concurrent directory-map grow leaves a reader
-# holding a stale HashEntry *. See docs/TODO-grow-race.md.
+# Un-quarantined. These used to segfault, then abort with ENODATA, on every
+# run; see docs/TODO-grow-race.md for the two bugs (the dropped page-fault
+# rollback, and grow() publishing the new directory and grow_nr_m separately).
 #
-# The second invocation depends on the store the first one leaves behind, so
-# once the first crashes the second is asserting on a corrupt store rather
-# than testing anything.
+# The second invocation reads the store the first one leaves behind, so it only
+# means anything while the first one succeeds -- keep them in this order.
 udepot-grow-test: $(TESTS)
 	rm -f /dev/shm/udepot-test
-	@$(call do_run_known_failing_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 17 --thin --force-destroy --grain-size 32 --val-size 3072,docs/TODO-grow-race.md)
-	@$(call do_run_known_failing_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 23 --thin --grain-size 32 --val-size 3072,docs/TODO-grow-race.md)
+	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 17 --thin --force-destroy --grain-size 32 --val-size 3072)
+	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 23 --thin --grain-size 32 --val-size 3072)
 	rm -f /dev/shm/udepot-test
 
 ifndef JAVAC
