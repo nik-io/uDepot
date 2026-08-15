@@ -32,3 +32,4 @@ salsa/src/frontends/usalsa++/build/
 python/pyudepot/libpyudepot.so
 .build-config
 test/uDepot/concurrent-get-test
+test/rwlock-pagefault/resizable_table

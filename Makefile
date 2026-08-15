@@ -179,6 +179,7 @@ TESTS = bin/udepot-test             \
         test/uDepot/Mbuff-test                     \
         test/uDepot/io-helpers              \
         test/uDepot/concurrent-get-test     \
+        test/rwlock-pagefault/resizable_table \
 
 
 MC_SERVER = bin/udepot-memcache-server
@@ -334,6 +335,7 @@ udepot_all_SRC = $(udepot_SRC)                     \
                  test/misc/inline_cache.cc         \
                  test/uDepot/io-helpers.cc         \
                  test/uDepot/concurrent-get-test.cc \
+                 test/rwlock-pagefault/resizable_table.cc \
                  bench/io_layer_bench.cc           \
                  python/wrapper/pyudepot.cc \
 
@@ -374,6 +376,9 @@ test/uDepot/io-helpers:  $(LIBTRT_OBJ) test/uDepot/io-helpers.o $(udepot_OBJ) $(
 	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
 
 test/uDepot/concurrent-get-test: $(LIBTRT_OBJ) test/uDepot/concurrent-get-test.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
+	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
+
+test/rwlock-pagefault/resizable_table: $(LIBTRT_OBJ) test/rwlock-pagefault/resizable_table.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
 	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
 
 bench/io_layer_bench: $(LIBTRT_OBJ) bench/io_layer_bench.o $(udepot_OBJ) $(LIBUSALSA_OBJ) $(LIBCITYHASH_LIB)
@@ -464,6 +469,11 @@ do_run_test = echo -n "RUNNING TEST: $(1) ... ";           \
 
 # Same, for a test that is known to fail for a reason already written down.
 # Reports loudly but does not fail the build. $(2) is the tracking document.
+#
+# Currently unused: udepot-grow-test, its only user, was un-quarantined once
+# the grow race was fixed. Kept because it is the documented way to quarantine
+# (see CLAUDE.md) -- the alternative that keeps getting reinvented is making
+# failure silent for every test to accommodate one.
 do_run_known_failing_test =                                       \
               echo -n "RUNNING TEST (known failing): $(1) ... ";   \
               errfile=`mktemp /tmp/udepot-log-XXXX.log`;           \
@@ -485,18 +495,16 @@ udepot-gc-test: $(TESTS)
 	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 262144 --size $$(((1048576+4096)*1024+1)) -w 180000 -r 180000 -t 1 --gc --grain-size 32 --val-size 3072)
 	rm -f /dev/shm/udepot-test
 
-# QUARANTINED: both of these segfault/abort on every run, and did so before
-# any of the recent lock fixes -- verified by building and running the same
-# test at the parent commit. A concurrent directory-map grow leaves a reader
-# holding a stale HashEntry *. See docs/TODO-grow-race.md.
+# Un-quarantined. These used to segfault, then abort with ENODATA, on every
+# run; see docs/TODO-grow-race.md for the two bugs (the dropped page-fault
+# rollback, and grow() publishing the new directory and grow_nr_m separately).
 #
-# The second invocation depends on the store the first one leaves behind, so
-# once the first crashes the second is asserting on a corrupt store rather
-# than testing anything.
+# The second invocation reads the store the first one leaves behind, so it only
+# means anything while the first one succeeds -- keep them in this order.
 udepot-grow-test: $(TESTS)
 	rm -f /dev/shm/udepot-test
-	@$(call do_run_known_failing_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 17 --thin --force-destroy --grain-size 32 --val-size 3072,docs/TODO-grow-race.md)
-	@$(call do_run_known_failing_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 23 --thin --grain-size 32 --val-size 3072,docs/TODO-grow-race.md)
+	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 17 --thin --force-destroy --grain-size 32 --val-size 3072)
+	@$(call do_run_test, bin/udepot-test -f /dev/shm/udepot-test --segment-size 4096 --size $$(((1048576+4096)*1024+1)) -w 100000 -r 100000 -t 23 --thin --grain-size 32 --val-size 3072)
 	rm -f /dev/shm/udepot-test
 
 ifndef JAVAC
@@ -605,13 +613,7 @@ run_tests: $(TESTS)
 	@$(call do_run_test,test/uDepot/udepot-utests -u)
 	@$(call do_run_test,test/uDepot/Mbuff-test)
 	@$(call do_run_test,test/uDepot/concurrent-get-test /tmp/udepot-concurrent-get-test)
-	# test/rwlock-pagefault/resizable_table was invoked here, but that binary
-	# has no source, no build rule, and no history in this repo -- the line was
-	# present in the initial import and the test itself never came with it. It
-	# "ran" for years as a command-not-found that do_run_test swallowed.
-	# Removed rather than quarantined: there is nothing to un-quarantine.
-	# rwlock_pagefault is the mechanism implicated in docs/TODO-grow-race.md,
-	# so it is worth writing a real test for it -- see that document.
+	@$(call do_run_test,test/rwlock-pagefault/resizable_table)
 	rm -f /dev/shm/udepot-test
 	make udepot-grow-test
 	make udepot-gc-test
