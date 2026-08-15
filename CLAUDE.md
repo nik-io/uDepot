@@ -9,22 +9,11 @@
    something so it cannot recur: a test that catches it, a default that makes
    it impossible, a check in the build, or a documented rule. A fix that only
    repairs the current instance is not finished.
+4. **Keep responses focused, brief, and concise**. Keep disclaimers and caveats short, and spend most of the response on the main answer. When asked to explain something, give a high-level summary unless an in-depth explanation is specifically requested.
+5. **Before your first tool call, say in one sentence what you're about to do**. While working, give a brief update only when you find something important or change direction. When you finish, lead with the outcome: your first sentence should answer "what happened" or "what did you find," with supporting detail after it for readers who want it.
+6. **Deliver what was asked, at the scope intended**. Make routine judgment calls yourself, and check in only when different readings of the request would lead to materially different work. If the request seems mistaken or a better approach exists, say so in a sentence and continue with the task as asked rather than quietly narrowing, widening, or transforming it. Finish the whole task, and stop short of actions that are clearly beyond what was asked.
+7. **Delegate to a subagent only for large tasks that are genuinely independent and parallelizable, such as a wide multi-file investigation.** Do not delegate work you can finish yourself in a handful of tool calls, and do not use subagents to verify or double-check your own work. If one subagent can complete the task, use one rather than several, and keep spawn counts low.
 
-## Commit Attribution
-
-Commits are **authored by nik-io <nicioan@gmail.com>** and **co-authored by
-Claude**. Claude is a co-author, not the author.
-
-`.claude/settings.json` sets `GIT_AUTHOR_*` and `GIT_COMMITTER_*` for this, and
-is checked in so it survives a fresh checkout or container. If it ever fails to
-apply, set it explicitly rather than committing as Claude:
-
-```bash
-git config user.name  "nik-io"
-git config user.email "nicioan@gmail.com"
-```
-
-Keep the `Co-Authored-By: Claude ...` trailer on Claude-assisted commits.
 
 ## Project Overview
 
