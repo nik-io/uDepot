@@ -83,10 +83,11 @@ These are foundational constraints. Every change must preserve them.
   why the write lock has to span the whole operation, and draining readers
   before `mprotect` was the only way to stop a crash once the page-fault
   rollback became unusable under coroutines. Deferred reclaim of retired
-  directories comes first, then gradual per-table growth (the uDepot paper's
-  improvement; `uDepotDirMapOR`'s shadow directory is the started half). Do not
-  "simplify" the grow path on the assumption that the current stall is
-  intended. See `docs/TODO-grow-race.md`, "What the design intends".
+  directories comes first (`docs/TODO-deferred-reclaim.md`), then gradual
+  per-table growth (the uDepot paper's improvement; `uDepotDirMapOR`'s shadow
+  directory is the started half). Do not "simplify" the grow path on the
+  assumption that the current stall is intended. See `docs/TODO-grow-race.md`,
+  "What the design intends".
 - **I/O backends**: Located in `src/uDepot/io/`. Each backend implements `uDepotIO_` interface. SPDK backends require DMA-safe buffers for NVMe commands.
 - **SpdkQpair**: Per-thread NVMe queue pair. `read_sync`/`write_sync` handle DMA buffer allocation internally. `read_raw_sync`/`write_raw_sync` expect pre-allocated DMA buffers.
 - **Python bindings**: `pyudepot` via ctypes in `src/uDepot/net/py-udepot.cc`. Shared library built as `libpyudepot.so`.

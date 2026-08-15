@@ -152,7 +152,8 @@ So, in order:
 1. **Deferred reclaim of retired directories** (epoch- or RCU-style). Retire
    instead of `munmap`; free once no reader can still hold the pointer. This is
    point 2, and it is what lets readers leave the write lock entirely. No
-   faults, so no rollback needed.
+   faults, so no rollback needed. Written up, with the two decisions it needs
+   first, in `docs/TODO-deferred-reclaim.md`.
 2. **Gradual growth** — copy one old table at a time, so only that table's
    writers stall, and only for one table's copy. This is the improvement
    discussed in the uDepot paper; `uDepotDirMapOR`'s shadow directory
