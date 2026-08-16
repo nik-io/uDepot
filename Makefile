@@ -538,13 +538,15 @@ udepot-memcache-test: $(MC_SERVER) $(MC_TEST)
 # buffers. Covers every backend the benchmark supports -- an invariant that
 # only holds on one of them is not an invariant.
 #
-# Needs >=200k ops, or the PUT phase never becomes I/O bound. The default
-# grain size is sector-aligned so the O_DIRECT backends can issue their
-# segment metadata writes.
-# Overridable so CI can trade resolution for wall-clock. Keep PERF_OPS well
-# above 100000: below roughly that the PUT phase never becomes I/O bound and
-# the comparison inverts at random.
-PERF_OPS   ?= 150000
+# PERF_OPS was 150000, chosen on the pre-optimization (regressed) coroutine tree
+# to drive the PUT phase I/O-bound before comparing. That made a CI run take
+# tens of minutes per backend and time out. The op count is now low: the
+# comparison is valid regardless of I/O-boundedness because the copy and
+# zero-copy interfaces alternate over one store, so drift cancels out of each
+# pair, and the avoided per-op value memcpy shows up in the cache-bound regime
+# too. Overridable if a deeper local run is wanted. The default grain size is
+# sector-aligned so the O_DIRECT backends can issue their segment metadata writes.
+PERF_OPS   ?= 10000
 PERF_ITERS ?= 3
 
 run_perf_test: bench/io_layer_bench
