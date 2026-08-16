@@ -27,6 +27,11 @@ endif
 
 CXX        ?= g++
 CXXFLAGS   += -Wall -Werror -std=c++20 $(INCLUDES)
+# Experimental clang builds (for HALO via [[clang::coro_await_elidable]]): keep
+# the gcc build strict, but don't let clang's extra pedantic warnings be fatal.
+ifneq ($(shell $(CXX) --version 2>/dev/null | grep -ci clang),0)
+CXXFLAGS   += -Wno-error
+endif
 ifeq (DEBUG,$(BUILD_TYPE))
 CXXFLAGS   += -O0 -ggdb
 else ifeq (NORMAL,$(BUILD_TYPE))

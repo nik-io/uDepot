@@ -1181,8 +1181,12 @@ uDepotSalsa<RT>::mbuff_prepend_append_md(Mbuff &keyval, const u64 key_size, cons
 	const u64 seg_idx = salsa::SalsaCtlr::grain_to_seg_idx(grain);
 	const u64 timestamp = md_m.get_seg_ts(seg_idx);
 	const uDepotSalsaStore md_base = {.key_size=(u16)key_size, .val_size=(u32)val_size, .timestamp=timestamp};
+	// Capture a pointer, not the object: uDepotSalsaStore has a flexible array
+	// member and clang forbids capturing such a variable in a lambda (even by
+	// reference). A pointer type has no FAM, so this is portable across gcc/clang.
+	const uDepotSalsaStore *const md_base_p = &md_base;
 	auto fn =
-		[&prepend_ok, &md_base]
+		[&prepend_ok, md_base_p]
 		(unsigned char *hdr, size_t hdr_len) -> size_t {
 			uDepotSalsaStore *md;
 			if (hdr_len != sizeof(*md)) {
@@ -1190,14 +1194,14 @@ uDepotSalsa<RT>::mbuff_prepend_append_md(Mbuff &keyval, const u64 key_size, cons
 				return 0;
 			}
 			md = (uDepotSalsaStore *)hdr;
-			md->key_size = md_base.key_size;
-			md->val_size = md_base.val_size;
-			md->timestamp = md_base.timestamp;
+			md->key_size = md_base_p->key_size;
+			md->val_size = md_base_p->val_size;
+			md->timestamp = md_base_p->timestamp;
 			prepend_ok = true;
 			return sizeof(*md);
 		};
 	auto append_fn =
-		[&append_ok, this, &md_base, &timestamp]
+		[&append_ok, this, md_base_p, &timestamp]
 		(unsigned char *ftr, size_t ftr_len) -> size_t {
 			uDepotSalsaStoreSuffix *mds;
 			if (ftr_len < sizeof(*mds)) {
@@ -1206,7 +1210,7 @@ uDepotSalsa<RT>::mbuff_prepend_append_md(Mbuff &keyval, const u64 key_size, cons
 			}
 			mds = (uDepotSalsaStoreSuffix *)ftr;
 			// TODO: add seed based on pba
-			mds->crc16 = this->md_m.checksum16(timestamp, (const u8 *) &md_base, sizeof(uDepotSalsaStore));
+			mds->crc16 = this->md_m.checksum16(timestamp, (const u8 *) md_base_p, sizeof(uDepotSalsaStore));
 			UDEPOT_DBG("writing crc16=0x%x", mds->crc16);
 			append_ok = true;
 			return sizeof(*mds);

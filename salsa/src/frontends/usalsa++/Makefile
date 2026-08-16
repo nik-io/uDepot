@@ -11,6 +11,12 @@ SALSA_INCLUDE = $(SALSA_SRC_DIR)/include
 
 
 WARNINGS       =  -Wall -Wno-unused-parameter -Wshadow -Werror
+# Experimental clang builds: keep gcc strict, but clang's extra warnings
+# (e.g. -Winitializer-overrides on intentional designated-init overrides) must
+# not be fatal.
+ifneq ($(shell $(CC) --version 2>/dev/null | grep -ci clang),0)
+WARNINGS       += -Wno-error
+endif
 WARNINGS_EXTRA = $(WARNINGS) -Wextra
 DEFS           = -D_GNU_SOURCE -D__STDC_FORMAT_MACROS
 

@@ -35,7 +35,19 @@ class AsyncObj;
 // This is exactly how uDepotLock::lock() came to be a no-op at four call
 // sites, leaving the shared Mbuff cache unlocked (docs/concurrent-get-fix.md).
 // Non-coroutine callers want lock_blocking(); coroutine callers must co_await.
-class [[nodiscard]] CoroTask {
+// clang-20+ can elide the heap frame of an awaited CoroTask into the caller
+// (Heap Allocation eLision Optimization) when told the awaitable is elidable.
+// gcc has no equivalent and would warn on the unknown attribute, so guard it.
+#if defined(__clang__) && defined(__has_cpp_attribute)
+#  if __has_cpp_attribute(clang::coro_await_elidable)
+#    define TRT_CORO_ELIDABLE [[clang::coro_await_elidable]]
+#  endif
+#endif
+#ifndef TRT_CORO_ELIDABLE
+#  define TRT_CORO_ELIDABLE
+#endif
+
+class [[nodiscard]] TRT_CORO_ELIDABLE CoroTask {
 public:
     struct promise_type {
         std::coroutine_handle<> continuation_ = nullptr; // set when co_await'd by outer
