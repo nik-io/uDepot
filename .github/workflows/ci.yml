@@ -51,16 +51,15 @@ jobs:
             build-essential libboost-dev zlib1g-dev libaio-dev
           python3 -m pip install --quiet pytest numpy
 
-      # The zero-copy invariant is measured inside a single run: the two KV
-      # interfaces alternate over one store, so the drift that makes absolute
-      # numbers useless on a shared runner cancels out of each pair. Runs on
-      # every backend -- an invariant that holds on only one is not one.
-      # Gates on the GET phase only (cache-bound: a real, consistent +6-12%
-      # zero-copy win at a few thousand ops). The PUT phase is reported but not
-      # gated -- it is I/O bound, so the one avoided memcpy is below write noise
-      # and its delta flips sign run to run. That earlier PUT gate is why the
-      # job needed 150k+ ops and timed out; a few thousand ops now suffice.
-      - name: Zero-copy invariant (AIO and io_uring)
+      # Zero-copy invariant via scripts/perf-zerocopy.sh: it drives udepot-test
+      # in copy (--thin) vs zero-copy (--thin --zero-copy) mode, interleaved, per
+      # backend, on a /dev/shm store, and fails if the zero-copy median is slower
+      # on PUT or GET. The tmpfs store keeps both phases cache-bound so the
+      # avoided memcpy is a real win; a small tolerance absorbs noise. Runs both
+      # aio and io_uring -- an invariant that holds on only one is not one. Fast:
+      # the earlier version used a separate bench that needed 150k+ ops and timed
+      # out.
+      - name: Zero-copy invariant (aio and io_uring)
         timeout-minutes: 20
         run: make -j"$(nproc)" BUILD_URING=1 run_perf_test
 

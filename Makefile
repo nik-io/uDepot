@@ -534,26 +534,25 @@ udepot-memcache-test: $(MC_SERVER) $(MC_TEST)
 # zero-copy path is not ahead. CI runs these on every push.
 .PHONY: run_perf_test run_pyudepot_build_test
 
-# Zero-copy invariant: the Mbuff KV interface must not be slower than raw
-# buffers. Covers every backend the benchmark supports -- an invariant that
-# only holds on one of them is not an invariant.
+# Zero-copy invariant: the Mbuff (zero-copy) KV interface must not be slower than
+# the raw-buffer (copy) one, on PUT and GET. Driven by udepot-test -- the same
+# binary the functional tests use -- via scripts/perf-zerocopy.sh; see that
+# script for the details. Covers every backend (5=aio, 6=io_uring); an invariant
+# that holds on only one is not one.
 #
-# PERF_OPS was 150000, chosen on the pre-optimization (regressed) coroutine tree
-# to drive the PUT phase I/O-bound before comparing. That made a CI run take
-# tens of minutes per backend and time out. The op count is now low: the
-# comparison is valid regardless of I/O-boundedness because the copy and
-# zero-copy interfaces alternate over one store, so drift cancels out of each
-# pair, and the avoided per-op value memcpy shows up in the cache-bound regime
-# too. Overridable if a deeper local run is wanted. The default grain size is
-# sector-aligned so the O_DIRECT backends can issue their segment metadata writes.
+# The store lives on /dev/shm (RAM-backed), so both PUT and GET are cache-bound
+# and the value memcpy the zero-copy path avoids is a real, consistent win. On a
+# real O_DIRECT device the ops are I/O bound and that ~2% saving is below device
+# noise (which is what made the CI flake on the uring GET phase). A few thousand
+# ops suffice and the job is fast; a small tolerance in the script absorbs
+# residual noise. (CI used to gate on a separate io_layer_bench that needed 150k+
+# ops and timed out.)
 PERF_OPS   ?= 10000
-PERF_ITERS ?= 3
+PERF_ITERS ?= 9
 
-run_perf_test: bench/io_layer_bench
-	@rm -f /tmp/io-layer-bench.udepot
-	@$(call do_run_test, bench/io_layer_bench --compare --aio -n $(PERF_OPS) -i $(PERF_ITERS))
-	@$(call do_run_test, bench/io_layer_bench --compare --uring -n $(PERF_OPS) -i $(PERF_ITERS))
-	@rm -f /tmp/io-layer-bench.udepot
+run_perf_test: bin/udepot-test
+	@$(call do_run_test, scripts/perf-zerocopy.sh 5 $(PERF_OPS) $(PERF_ITERS))
+	@$(call do_run_test, scripts/perf-zerocopy.sh 6 $(PERF_OPS) $(PERF_ITERS))
 
 # Python bindings: a build test. It builds libpyudepot.so, imports it, and
 # round-trips a key/value through the real library.
