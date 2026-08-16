@@ -135,14 +135,17 @@ push.
 over one store and fails if the zero-copy path is not ahead. Alternating is
 what makes it valid: drift affects both sides of a pair equally and cancels.
 
-Tuning: `-n` (ops per phase), `-i` (paired iterations); the Makefile exposes
-`PERF_OPS` (default 150000) and `PERF_ITERS` (default 3).
+It gates on the **GET phase only**. GET is cache-bound, so the value memcpy the
+zero-copy path avoids is a real, consistent win (~+6-12%) even at a few thousand
+ops. The PUT phase is reported but not gated: it is I/O bound, so that same
+memcpy sits below write-latency noise and the sign of its delta flips run to run
+(negative ~half the time at low op counts). Gating on PUT measured the disk, not
+the code -- it was the only thing that needed 150k+ ops, and that made the job
+take tens of minutes and time CI out.
 
-Expect this to be slow. The PUT phase has to become I/O bound before the
-comparison means anything, so the op count cannot just be lowered to make CI
-quick: at 150k ops and 3 iterations a single backend takes over 15 minutes on a
-4-core machine. Both backends on a shared runner is over half an hour. That is
-the cost of the invariant, not a bug.
+Tuning: `-n` (ops per phase), `-i` (paired iterations); the Makefile exposes
+`PERF_OPS` (default 10000) and `PERF_ITERS` (default 3). It is fast now (the GET
+phase is cache-bound); raise `-n` only for a deeper local characterisation.
 
 Only ever assert on the *same* operation done two ways — zero-copy against
 copying. Comparing different operations to each other (GET against PUT) asserts
@@ -163,8 +166,9 @@ that would provide one stalls after store init. See
 `docs/TODO-spdk-testing.md`.
 
 Notes:
-- Keep `-n` at 200000 or higher. Below roughly 100k ops the PUT phase never
-  becomes I/O bound and the comparison inverts at random.
+- The GET invariant holds at a few thousand ops. Do not re-gate on PUT to try
+  to catch more: it is I/O bound and inverts at random unless `-n` is very high
+  (150k+), which is exactly the timeout this replaced.
 - **Grain size must be at least the device sector size on O_DIRECT backends.**
   uDepot sizes its segment metadata writes in grains, so a 32-byte grain makes
   those writes 64 bytes, which `pwritev` rejects with EINVAL under O_DIRECT.

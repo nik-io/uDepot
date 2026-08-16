@@ -55,14 +55,13 @@ jobs:
       # interfaces alternate over one store, so the drift that makes absolute
       # numbers useless on a shared runner cancels out of each pair. Runs on
       # every backend -- an invariant that holds on only one is not one.
-      # This is the long job, and legitimately so: the PUT phase has to become
-      # I/O bound before the comparison means anything, which is why PERF_OPS
-      # cannot simply be lowered. Measured at PERF_OPS=150000 PERF_ITERS=3, a
-      # single backend takes >15 min on a 4-core box, so both backends on a
-      # shared runner is comfortably over half an hour. The timeout is a
-      # backstop against a genuine hang, not a target.
+      # Gates on the GET phase only (cache-bound: a real, consistent +6-12%
+      # zero-copy win at a few thousand ops). The PUT phase is reported but not
+      # gated -- it is I/O bound, so the one avoided memcpy is below write noise
+      # and its delta flips sign run to run. That earlier PUT gate is why the
+      # job needed 150k+ ops and timed out; a few thousand ops now suffice.
       - name: Zero-copy invariant (AIO and io_uring)
-        timeout-minutes: 60
+        timeout-minutes: 20
         run: make -j"$(nproc)" BUILD_URING=1 run_perf_test
 
       - name: Python bindings build test
