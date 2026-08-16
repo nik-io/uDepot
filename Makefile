@@ -534,17 +534,19 @@ udepot-memcache-test: $(MC_SERVER) $(MC_TEST)
 # zero-copy path is not ahead. CI runs these on every push.
 .PHONY: run_perf_test run_pyudepot_build_test
 
-# Zero-copy GET invariant: the Mbuff (zero-copy) KV interface must not be slower
-# than the raw-buffer (copy) one on GET. Driven by udepot-test -- the same binary
-# the functional tests use -- via scripts/perf-zerocopy.sh; see that script for
-# the details. Covers every backend (5=aio, 6=io_uring); an invariant that holds
-# on only one is not one.
+# Zero-copy invariant: the Mbuff (zero-copy) KV interface must not be slower than
+# the raw-buffer (copy) one, on PUT and GET. Driven by udepot-test -- the same
+# binary the functional tests use -- via scripts/perf-zerocopy.sh; see that
+# script for the details. Covers every backend (5=aio, 6=io_uring); an invariant
+# that holds on only one is not one.
 #
-# We gate on GET, not PUT: GET is cache-bound, so the value memcpy the zero-copy
-# path avoids is a real, consistent win (~+4-7%); PUT is I/O bound, so that same
-# memcpy is below write-latency noise and its delta flips sign run to run. A few
-# thousand ops therefore suffice and the job is fast. (CI used to gate on the PUT
-# phase of a separate io_layer_bench, which needed 150k+ ops and timed out.)
+# The store lives on /dev/shm (RAM-backed), so both PUT and GET are cache-bound
+# and the value memcpy the zero-copy path avoids is a real, consistent win. On a
+# real O_DIRECT device the ops are I/O bound and that ~2% saving is below device
+# noise (which is what made the CI flake on the uring GET phase). A few thousand
+# ops suffice and the job is fast; a small tolerance in the script absorbs
+# residual noise. (CI used to gate on a separate io_layer_bench that needed 150k+
+# ops and timed out.)
 PERF_OPS   ?= 10000
 PERF_ITERS ?= 9
 

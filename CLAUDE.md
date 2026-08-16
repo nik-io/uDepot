@@ -133,17 +133,19 @@ push.
 
 `run_perf_test` runs `scripts/perf-zerocopy.sh` for each backend (5=aio,
 6=io_uring). The script runs `udepot-test` in copy (`--thin`) and zero-copy
-(`--thin --zero-copy`) modes, interleaved, and fails if the zero-copy **GET**
-median is slower than the copy median. Interleaving cancels the slow throughput
-drift a shared runner has.
+(`--thin --zero-copy`) modes, interleaved, and fails if the zero-copy median is
+slower than the copy median on **either PUT or GET**. Interleaving cancels the
+slow throughput drift a shared runner has.
 
-It gates on GET, not PUT. GET is cache-bound, so the value memcpy the zero-copy
-path avoids is a real, consistent win (~+4-7%). PUT is I/O bound -- that same
-memcpy is below write-latency noise and its delta flips sign run to run -- so we
-do not gate on it. A few thousand ops therefore suffice and the job is fast. (It
-used to gate on the PUT phase of a separate `bench/io_layer_bench` and needed
-150k+ ops, which timed CI out; that bench is still buildable but no longer used
-by CI.)
+The store is on `/dev/shm` (RAM-backed, buffered), which is load-bearing: it
+makes both PUT and GET **cache-bound**, so the value memcpy the zero-copy path
+avoids is a real, consistent win (PUT ~+3-7%, GET ~+5-13%). On a real O_DIRECT
+device the ops are I/O bound and that ~2% saving is below device noise, so the
+delta flips sign run to run -- which is exactly why an earlier version, gating on
+GET over a normal device, failed on the uring backend. A small tolerance (the
+script's 4th arg, default 5%) absorbs residual per-pair noise; a real zero-copy
+regression is far larger. (CI used to gate on a separate `bench/io_layer_bench`
+that needed 150k+ ops and timed out; it is still buildable but no longer used.)
 
 Tuning via the Makefile: `PERF_OPS` (default 10000) and `PERF_ITERS` (default 9,
 the number of interleaved copy/zero-copy pairs). Raise them only for a deeper
@@ -168,9 +170,10 @@ that would provide one stalls after store init. See
 `docs/TODO-spdk-testing.md`.
 
 Notes:
-- The GET invariant holds at a few thousand ops. Do not re-gate on PUT to try
-  to catch more: it is I/O bound and inverts at random unless `-n` is very high
-  (150k+), which is exactly the timeout this replaced.
+- Both PUT and GET are gated, and hold at a few thousand ops -- but only because
+  the store is on `/dev/shm`. On a real O_DIRECT device both are I/O bound and
+  invert at random unless `-n` is very high (150k+), which is exactly the timeout
+  this replaced. Keep the store on tmpfs.
 - **Grain size must be at least the device sector size on O_DIRECT backends.**
   uDepot sizes its segment metadata writes in grains, so a 32-byte grain makes
   those writes 64 bytes, which `pwritev` rejects with EINVAL under O_DIRECT.
