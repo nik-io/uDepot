@@ -1510,7 +1510,16 @@ uDepotSalsa<RT>::put(Mbuff &keyval, const size_t key_size, const PutOp op)
 		PROBE_TICKS_START(local_put_mbuff);
 		do {
 			u64 old_pba = -1ULL;
-			rc = (int)(co_await local_op_execute(h, local_put_mbuff_m, h, keyval, key_size, grain, op, &old_pba));
+			// Inlined local_op_execute(): removes a coroutine layer from the PUT
+			// map-update path. local_put_mbuff() drops/re-acquires the map lock
+			// across its IO internally and returns with it held (same as GET).
+			typename RT::RwpfTy *const rwlpf = &map_m.dir_ref_m.rwpflock;
+			rwlpf->rd_enter();
+			uDepotMap<RT> *const udm = this->map_m.hash_to_map(h);
+			co_await udm->lock(h);
+			rc = (int)(co_await local_put_mbuff(h, keyval, key_size, grain, op, &old_pba));
+			udm->unlock(h);
+			rwlpf->rd_exit();
 			switch (rc) {
 			case 0:
 				break;
@@ -1598,9 +1607,31 @@ uDepotSalsa<RT>::get(Mbuff const& key, Mbuff &val_out)
 	}
 
 	PROBE_TICKS_START(local_get_mbuff);
-	trt::RetT ret = co_await local_op_execute(h, local_get_mbuff_m, h, key, val_out);
+	// Inlined local_op_execute() + local_get_mbuff() worker: removes two
+	// coroutine layers (and their resume hops) from the local GET fast path.
+	// The lock dance is preserved -- lookup_mbuff() drops/re-acquires the map
+	// lock across IO internally and returns with it held.
+	typename RT::RwpfTy *const rwlpf = &map_m.dir_ref_m.rwpflock;
+	rwlpf->rd_enter();
+	uDepotMap<RT> *const udm = this->map_m.hash_to_map(h);
+	co_await udm->lock(h);
+
+	size_t val_size = 0; HashEntry trgt(0, 0);
+	const size_t key_size = key.get_valid_size();
+	co_await lookup_mbuff(h, key, 0, key_size, val_out, &trgt, &err, &val_size);
+	if (err == EEXIST) {
+		err = 0;
+		assert(0 < val_size);
+		assert(trgt.kv_size <= val_out.get_valid_size() / grain_size_m);
+		val_out.reslice(val_size, putKeyvalPrefixSize() + key_size);
+	} else {
+		val_out.reslice(0);
+	}
+
+	udm->unlock(h);
+	rwlpf->rd_exit();
 	PROBE_TICKS_END(local_get_mbuff);
-	co_return ret;
+	co_return (trt::RetT)(int)err;
 }
 
 // Metadata-only lookup: reads only the on-disk header + key to verify a
