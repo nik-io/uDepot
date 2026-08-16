@@ -30,6 +30,11 @@ namespace udepot {
 class uDepotLock {
 public:
 	virtual trt::CoroTask lock() = 0;
+	// Non-suspending fast-path acquire: returns true iff the lock was taken
+	// without contention. Callers use this to avoid allocating a lock()
+	// coroutine frame on the common (uncontended) path, falling back to
+	// co_await lock() only when it returns false. See uDepotMap::lock().
+	virtual bool try_lock() = 0;
 	virtual void lock_blocking() = 0;
 	virtual void unlock() = 0;
 
@@ -61,6 +66,8 @@ public:
 		co_return 0;
 	}
 
+	bool try_lock() override { return pthread_mutex_trylock(&lock_m) == 0; }
+
 	void lock_blocking() override {
 		int ret = pthread_mutex_lock(&lock_m);
 		if (ret != 0) {
@@ -89,6 +96,8 @@ public:
 		pthread_spin_lock(&lock_m);
 		co_return 0;
 	}
+
+	bool try_lock() override { return pthread_spin_trylock(&lock_m) == 0; }
 
 	void lock_blocking() override {
 		pthread_spin_lock(&lock_m);
@@ -131,6 +140,8 @@ public:
 			}
 		}
 	}
+
+	bool try_lock() override { return pthread_mutex_trylock(&lock_m) == 0; }
 
 	void lock_blocking() override {
 		for (;;) {

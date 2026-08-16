@@ -228,8 +228,11 @@ public:
 	trt::CoroTask lock(const u64 h) {
 		uDepotLock *sl1, *sl2;
 		lock_common(h, &sl1, &sl2);
-		co_await sl1->lock();
-		if (nullptr != sl2)
+		// Fast path: acquire without allocating a lock() coroutine frame.
+		// Only fall back to co_await lock() (which may suspend) on contention.
+		if (!sl1->try_lock())
+			co_await sl1->lock();
+		if (nullptr != sl2 && !sl2->try_lock())
 			co_await sl2->lock();
 	}
 	void lock_blocking(const u64 h) {
@@ -247,8 +250,11 @@ public:
 		sl1->unlock();
 	}
 	trt::CoroTask lock(uDepotLock *const sl1, uDepotLock *const sl2) {
-		co_await sl1->lock();
-		if (nullptr != sl2)
+		// Fast path: acquire without allocating a lock() coroutine frame.
+		// Only fall back to co_await lock() (which may suspend) on contention.
+		if (!sl1->try_lock())
+			co_await sl1->lock();
+		if (nullptr != sl2 && !sl2->try_lock())
 			co_await sl2->lock();
 	}
 	void unlock(uDepotLock *const sl1, uDepotLock *const sl2) {
