@@ -111,10 +111,54 @@ io_pread_mbuff_append_full(IO &io, Mbuff &mb, size_t io_len, off_t io_off,
 	}
 
 	while (bytes_read < io_len) {
-		size_t op_len = io_len - bytes_read;
-		size_t op_off = io_off + bytes_read;
-		ssize_t ret = (ssize_t)(co_await io_pread_mbuff_append(io, mb, op_len, op_off));
-		UDEPOT_DBG("ret=%zd len:%zd mb valid size:%zd\n", ret, op_len, mb.get_valid_size());
+		const size_t op_len = io_len - bytes_read;
+		const off_t  op_off = io_off + bytes_read;
+
+		// Inlined io_pread_mbuff_append(): folding the per-chunk read into this
+		// loop removes one coroutine layer (and its resume hop) from every KV
+		// read. Backend-agnostic: still dispatches through io.{pread,preadv}_native,
+		// so aio / io_uring / spdk are covered by their own IO::*_native impls.
+		if (mb.append_avail_size() < op_len) {
+			UDEPOT_ERR("mbuff: not enough free space (avail %zd, io_len %zd)", mb.append_avail_size(), op_len);
+			err = ENOSPC;
+			break;
+		}
+		assert(mb.ioptr_compatible<typename IO::Ptr>());
+		const size_t iov_size = 16;
+		struct iovec iov[iov_size];
+		size_t remaining = op_len;
+		size_t iov_cnt = 0;
+		auto append_fn =
+			[&remaining, &iov, &iov_size, &iov_cnt]
+			(unsigned char *b, size_t len) -> size_t {
+				if (iov_cnt == iov_size || remaining == 0)
+					return 0;
+				size_t min_len = std::min(remaining, len);
+				iov[iov_cnt].iov_base = b;
+				iov[iov_cnt].iov_len = min_len;
+				iov_cnt++;
+				remaining -= min_len;
+				return min_len;
+			};
+		mb.append(std::ref(append_fn));
+		const size_t op_bytes = op_len - remaining;
+		assert(iovec_len(iov, iov_cnt) == op_bytes);
+
+		ssize_t ret;
+		if (iov_cnt == 1) {
+			typename IO::Ptr io_ptr(iov[0].iov_base, iov[0].iov_len);
+			ret = (ssize_t)(co_await io.pread_native(std::move(io_ptr), iov[0].iov_len, op_off));
+		} else {
+			IoVec<typename IO::Ptr> iov_ptr(iov, iov_cnt);
+			ret = (ssize_t)(co_await io.preadv_native(iov_ptr, op_off));
+		}
+		if (ret < 0) {
+			mb.reslice(mb.get_valid_size() - op_bytes);
+			ret = -errno;
+		} else if (static_cast<size_t>(ret) < op_bytes) {
+			mb.reslice(mb.get_valid_size() - op_bytes + ret);
+		}
+
 		if (ret < 0) {
 			err = -(static_cast<int>(ret));
 			break;
