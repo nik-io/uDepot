@@ -210,7 +210,9 @@ void TrtSpdkArrayIO::thread_init(void) {
 	trt_dmsg("Initializing SPDK\n");
 	trt::SPDK::init(GlobalState__.spdk_state_);
 	trt_dmsg("Spawning SPDK poller\n");
-	trt::T::spawn(trt::SPDK::poller_task, nullptr, nullptr, true, trt::TaskType::TASK);
+	// See trt-spdk.cc: from a non-coroutine, T::spawn()'s awaitable is dropped
+	// and the poller never runs. Use spawn_detached_no_wait().
+	trt::T::spawn_detached_no_wait(trt::SPDK::poller_task, nullptr, trt::TaskType::TASK);
 	trt_dmsg("init done\n");
 	SpdkThreadInitialized__ = true;
 }

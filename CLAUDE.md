@@ -160,14 +160,20 @@ build test rather than a perf assertion.
 The invariant is checked on every backend the benchmark supports (AIO and
 io_uring). An invariant that only holds on one backend is not an invariant.
 
-SPDK is **not** covered. `make -C trt run_spdk_bdev_test` and
-`run_spdk_bdev_perf` run against a memory-backed bdev and restore the hugepages
-they reserve, but they use SPDK's own event framework and never touch
-`trt::SPDK`, `SpdkQpair`, or the TRT scheduler -- they are build and
-environment smoke tests, not backend coverage. Testing the backend needs an
-NVMe namespace (it uses the raw NVMe driver, not bdev), and the NVMe-oF route
-that would provide one stalls after store init. See
-`docs/TODO-spdk-testing.md`.
+The SPDK backend is covered by `make BUILD_SPDK=1 run_spdk_nvmef_test`
+(`scripts/spdk-nvmef-test.sh`): it starts a loopback SPDK `nvmf_tgt` exporting a
+RAM-backed malloc bdev as an NVMe namespace over TCP and runs `udepot-test`'s
+SPDK backend (`-u 7`) against it as a fabrics initiator, so it drives
+`trt::SPDK`, `SpdkQpair` and the TRT scheduler on the I/O path. The backend
+learns the target from the `UDEPOT_NVMEF` env var, so `udepot-test` needs no new
+flag. This is separate from `make -C trt run_spdk_bdev_test` /
+`run_spdk_bdev_perf`, which use SPDK's own event framework and never touch the
+backend -- they are build/environment smoke tests, not backend coverage. Getting
+the nvmef route working exposed three latent bugs (the completion poller was
+spawned with a discarded awaitable and never ran; the admin queue was never
+polled so fabrics keep-alives timed out; the directory footer overran a
+huge-page mapping at shutdown); see `docs/TODO-spdk-testing.md`. The zero-copy
+perf invariant over SPDK is still not asserted in a Makefile target.
 
 Notes:
 - Both PUT and GET are gated, and hold at a few thousand ops -- but only because

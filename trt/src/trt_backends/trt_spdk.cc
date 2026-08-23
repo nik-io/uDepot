@@ -202,6 +202,7 @@ CoroTask SPDK::poller_task(void *unused)
 {
     while (!SpdkState__.is_done()) {
         SpdkState__.execute_completions();  // calls spdk_io_cb → T::local_single_notify
+        SpdkState__.process_admin_completions();  // drive fabrics keep-alives (throttled)
         co_await T::yield();
     }
     co_return 0;

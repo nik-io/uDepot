@@ -469,7 +469,9 @@ spdk_io_scheduler(void *arg)
 	trt_dmsg("init done\n");
 	SpdkIOMgrThreadState__.init();
 	trt_dmsg("Spawning SPDK poller\n");
-	trt::T::spawn(trt::SPDK::poller_task, nullptr, nullptr, true, trt::TaskType::TASK);
+	// See trt-spdk.cc: from a non-coroutine, T::spawn()'s awaitable is dropped
+	// and the poller never runs. Use spawn_detached_no_wait().
+	trt::T::spawn_detached_no_wait(trt::SPDK::poller_task, nullptr, trt::TaskType::TASK);
 	SpdkThreadInitialized__ = true;
 	if (0 == sched_id)
 		mgr->size_m = SpdkIOMgrThreadState__.get_size();

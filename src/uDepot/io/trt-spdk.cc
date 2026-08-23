@@ -9,6 +9,8 @@
  *
  */
 
+#include <cstdlib> // getenv
+
 #include "uDepot/io/trt-spdk.hh"
 #include "trt_backends/trt_spdk.hh"
 #include "util/debug.h"
@@ -34,7 +36,49 @@ void TrtSpdkIO::add_nvmef_target(NvmefTransport transport,
 	SpdkGlobalState__.add_nvmef_target(std::move(t));
 }
 
+// Register any NVMe-oF targets named in the UDEPOT_NVMEF environment variable
+// before controllers are probed. This is what lets the SPDK backend run against
+// a software fabrics target (e.g. a loopback nvmf_tgt in CI) with no NVMe
+// hardware, without any command-line change to the drivers (udepot-test etc.).
+//
+// Format: one or more TCP targets, ';'-separated, each traddr:trsvcid:subnqn.
+// The subnqn itself contains ':' (e.g. nqn.2016-06.io.spdk:cnode1), so each
+// entry is split on its first two ':' only and the remainder is the nqn.
+//   UDEPOT_NVMEF=127.0.0.1:4420:nqn.2016-06.io.spdk:cnode1
+static void add_env_nvmef_targets(void) {
+	const char *env = getenv("UDEPOT_NVMEF");
+	if (env == nullptr || env[0] == '\0')
+		return;
+
+	const std::string spec(env);
+	size_t pos = 0;
+	while (pos < spec.size()) {
+		size_t sep = spec.find(';', pos);
+		const std::string entry =
+			spec.substr(pos, sep == std::string::npos ? std::string::npos : sep - pos);
+		pos = (sep == std::string::npos) ? spec.size() : sep + 1;
+		if (entry.empty())
+			continue;
+
+		const size_t c1 = entry.find(':');
+		const size_t c2 = entry.find(':', c1 + 1);
+		if (c1 == std::string::npos || c2 == std::string::npos) {
+			UDEPOT_ERR("UDEPOT_NVMEF entry '%s' is not traddr:trsvcid:subnqn; ignoring\n",
+			           entry.c_str());
+			continue;
+		}
+		const std::string traddr  = entry.substr(0, c1);
+		const std::string trsvcid = entry.substr(c1 + 1, c2 - c1 - 1);
+		const std::string subnqn  = entry.substr(c2 + 1);
+		UDEPOT_MSG("UDEPOT_NVMEF: adding TCP target %s:%s (%s)\n",
+		           traddr.c_str(), trsvcid.c_str(), subnqn.c_str());
+		TrtSpdkIO::add_nvmef_target(TrtSpdkIO::NvmefTransport::TCP,
+		                            traddr, trsvcid, subnqn);
+	}
+}
+
 void TrtSpdkIO::global_init(void) {
+	add_env_nvmef_targets();
 	SpdkGlobalState__.init();
 }
 
@@ -43,7 +87,14 @@ void TrtSpdkIO::thread_init(void) {
 	trt_dmsg("Initializing SPDK\n");
 	trt::SPDK::init(SpdkGlobalState__);
 	trt_dmsg("Spawining SPDK poller\n");
-	trt::T::spawn(trt::SPDK::poller_task, nullptr, nullptr, true, trt::TaskType::TASK);
+	// thread_init() is a plain function, not a coroutine: T::spawn() returns a
+	// SpawnAwaitable that only enqueues the task when co_awaited, so calling it
+	// here silently dropped the poller and it was never scheduled -- I/O
+	// submitted on the qpair then never had its completions reaped and the
+	// store hung right after init. spawn_detached_no_wait() enqueues without
+	// suspending and is the API the AIO/io_uring pollers already use from their
+	// own thread_init().
+	trt::T::spawn_detached_no_wait(trt::SPDK::poller_task, nullptr, trt::TaskType::TASK);
 	trt_dmsg("init done\n");
 	SpdkThreadInitialized__ = true;
 }

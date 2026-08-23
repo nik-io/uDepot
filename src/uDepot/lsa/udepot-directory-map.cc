@@ -192,14 +192,28 @@ uDepotDirectoryMap<RT>::grow()
 		}
 		const u64 mmap_offset = grain * grain_size;
 		bool huge = false;
-		dme.mm_region = udepot_io_m.mmap(nullptr, mmap_size_huge_b, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_HUGETLB, mmap_offset);
-		if (MAP_FAILED == dme.mm_region) {
-			UDEPOT_DBG("mmap (size=%zd) with huge pages failed. Falling back 4k mmap, might be slow\n",
-				mmap_size_huge_b);
-			dme.mm_region = udepot_io_m.mmap(nullptr, mmap_size_b, PROT_READ|PROT_WRITE, MAP_SHARED, mmap_offset);
-		} else {
-			huge = true;
+		// Only take the huge-page mapping when the segment's data region is
+		// itself a multiple of the huge-page size. MAP_HUGETLB requires a
+		// 2MiB-aligned length, so for any other geometry the huge mapping is
+		// align_down(seg_size*grain_size, 2MiB) -- strictly smaller than the
+		// region -- while the directory footer lives at
+		// seg_size*grain_size - sizeof(dirmap_ftr) on disk (see restore(), which
+		// preads it at md_grain*grain_size - sizeof(ftr)). A footer written
+		// through a too-small huge mapping lands past its end: an out-of-bounds
+		// write that crashes shutdown intermittently. The 4KiB mapping covers
+		// the whole region and keeps size_b == seg_size*grain_size, so the
+		// footer offset is always mapped. This surfaced only once the SPDK
+		// backend (which reserves hugepages) actually ran to shutdown.
+		if (mmap_size_huge_b == mmap_size_b) {
+			dme.mm_region = udepot_io_m.mmap(nullptr, mmap_size_huge_b, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_HUGETLB, mmap_offset);
+			if (MAP_FAILED != dme.mm_region)
+				huge = true;
+			else
+				UDEPOT_DBG("mmap (size=%zd) with huge pages failed. Falling back 4k mmap, might be slow\n",
+					mmap_size_huge_b);
 		}
+		if (!huge)
+			dme.mm_region = udepot_io_m.mmap(nullptr, mmap_size_b, PROT_READ|PROT_WRITE, MAP_SHARED, mmap_offset);
 		if (MAP_FAILED == dme.mm_region) {
 			UDEPOT_ERR("mmap (size=%zd) failed with %s %d\n", mmap_size_b, strerror(errno), errno);
 			salsa::SalsaCtlr::release_grains(grain, mmap_size_grains);
@@ -681,14 +695,19 @@ uDepotDirectoryMap<RT>::restore(salsa::Scm *const scm, uDepotSalsa<RT> *const ud
 		const u64 mmap_offset = grain * grain_size;
 		auto &dme = (*new_dir)[rmd.hdr.idx];
 		bool huge = false;
-		dme.mm_region = udepot_io_m.mmap(nullptr, mmap_size_huge_b, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_HUGETLB, mmap_offset);
-		if (MAP_FAILED == dme.mm_region) {
-			UDEPOT_DBG("mmap (size=%zd) with huge pages failed. Falling back 4k mmap, might be slow\n",
-				mmap_size_huge_b);
-			dme.mm_region = udepot_io_m.mmap(nullptr, mmap_size_b, PROT_READ|PROT_WRITE, MAP_SHARED, mmap_offset);
-		} else {
-			huge = true;
+		// See grow(): huge pages only when seg_size*grain_size is 2MiB-aligned,
+		// so the mapping always covers the footer at seg_size*grain_size -
+		// sizeof(dirmap_ftr).
+		if (mmap_size_huge_b == mmap_size_b) {
+			dme.mm_region = udepot_io_m.mmap(nullptr, mmap_size_huge_b, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_HUGETLB, mmap_offset);
+			if (MAP_FAILED != dme.mm_region)
+				huge = true;
+			else
+				UDEPOT_DBG("mmap (size=%zd) with huge pages failed. Falling back 4k mmap, might be slow\n",
+					mmap_size_huge_b);
 		}
+		if (!huge)
+			dme.mm_region = udepot_io_m.mmap(nullptr, mmap_size_b, PROT_READ|PROT_WRITE, MAP_SHARED, mmap_offset);
 		if (MAP_FAILED == dme.mm_region) {
 			UDEPOT_ERR("mmap (size=%zd) failed with %d\n", mmap_size_b, errno);
 			rc = ENOMEM;
