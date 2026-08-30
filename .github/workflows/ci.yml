@@ -113,3 +113,14 @@ jobs:
       - name: SPDK bdev perf (report only)
         continue-on-error: true
         run: sudo -E make -C trt BUILD_SPDK=1 run_spdk_bdev_perf
+
+      # Actual coverage of the TRT SPDK backend: udepot-test's SPDK path (-u 7)
+      # run as an NVMe-oF initiator against a loopback SPDK nvmf_tgt that exports
+      # a RAM-backed malloc bdev as an NVMe namespace. No NVMe hardware needed.
+      # Unlike the bdev smoke tests above, this drives trt::SPDK, SpdkQpair and
+      # the TRT scheduler on the I/O path. See docs/TODO-spdk-testing.md.
+      - name: SPDK NVMe-oF backend test (software target)
+        timeout-minutes: 10
+        # Match the build step's flags (BUILD_URING=1) so the build-config stamp
+        # matches and nothing is rebuilt under different flags.
+        run: sudo -E make BUILD_SPDK=1 BUILD_URING=1 run_spdk_nvmef_test

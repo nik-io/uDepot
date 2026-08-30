@@ -204,11 +204,34 @@ buffered and has no such constraint.
 
 ### Testing the SPDK backend without NVMe hardware
 
-**The TRT SPDK backend is currently untested on hardware-less machines.** See
-[docs/TODO-spdk-testing.md](docs/TODO-spdk-testing.md) for the blocker, the
-evidence gathered so far, and a reproduction.
+The TRT SPDK backend is exercised end to end against a **software NVMe-over-Fabrics
+target** — no NVMe device required:
 
-What runs today is a build and environment smoke test:
+```
+$ make BUILD_SPDK=1 run_spdk_nvmef_test   # needs root: hugepages + a loopback target
+```
+
+This starts an SPDK `nvmf_tgt` that exports a RAM-backed malloc bdev as an NVMe
+namespace over TCP loopback, then runs `udepot-test`'s SPDK backend (`-u 7`) as a
+fabrics initiator against it and checks that PUTs/GETs complete and the store
+shuts down cleanly. Unlike the bdev smoke tests below, this drives `trt::SPDK`,
+`SpdkQpair` and the TRT scheduler on the actual I/O path. The driver is
+`scripts/spdk-nvmef-test.sh`; it sets up hugepages and the target and tears them
+down again, including on failure. See
+[docs/TODO-spdk-testing.md](docs/TODO-spdk-testing.md) for the three backend bugs
+this exposed and how they were fixed.
+
+The backend learns the target from the `UDEPOT_NVMEF` environment variable
+(`traddr:trsvcid:subnqn`), so any SPDK-backend driver reaches a fabrics target
+with no command-line change:
+
+```
+$ UDEPOT_NVMEF=127.0.0.1:4420:nqn.2016-06.io.spdk:cnode1 \
+    bin/udepot-test -f 'SPDK' -u 7 --thin --force-destroy \
+    -w 20000 -r 20000 -t 1 --grain-size 512 --val-size 3072
+```
+
+There is also a build and environment smoke test, narrower in scope:
 
 ```
 $ make -C trt BUILD_SPDK=1 run_spdk_bdev_test   # unit
@@ -222,9 +245,9 @@ never touches `trt::SPDK`, `SpdkQpair`, or the TRT scheduler. It confirms SPDK
 builds and links and that the bdev API works — not that uDepot's SPDK path
 does.
 
-Testing the backend itself needs an NVMe namespace, because uDepot's SPDK
-backend is the raw NVMe driver rather than the bdev layer. A malloc bdev can
-only reach it exported over NVMe-oF, which is the route the TODO covers.
+The backend test needs an NVMe namespace because uDepot's SPDK backend is the
+raw NVMe driver rather than the bdev layer. A malloc bdev can only reach it
+exported over NVMe-oF, which is what the soft target provides.
 
 **Device size must not be an exact multiple of the segment size.** uDepot puts
 its device metadata in the tail left over after `align_down(device_size,

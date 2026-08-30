@@ -77,6 +77,46 @@ These are foundational constraints. Every change must preserve them.
   directory is the started half). Do not "simplify" the grow path on the
   assumption that the current stall is intended. See `docs/TODO-grow-race.md`,
   "What the design intends".
+- **Segment geometry — one layout, three consumers.** The device is divided
+  into fixed-size **segments** of `get_seg_size()` grains. Segments tile from
+  the device start on a `segment_bytes = get_seg_size()*grain` grid, so segment
+  N sits at device offset `N * segment_bytes`. The **last `get_seg_md_size()`
+  grain(s) of every segment** hold salsa's per-segment metadata; what remains is
+  the **net segment** (`seg_size = get_seg_size() - get_seg_md_size()` grains),
+  used for either data or a directory table. A directory table lays out
+  `[dirmap_hdr | hash table | dirmap_ftr]` inside the net segment, with the
+  512-byte footer at the very end (`seg_size*grain - sizeof(dirmap_ftr)`);
+  `restore()` reads it back with a plain `pread` at that offset, independent of
+  how the table was mapped. Separately, one page of **device-level** salsa
+  metadata lives in the tail past the last whole segment
+  (`align_down(device, segment_bytes)`) — which is why the device size must not
+  be an exact multiple of the segment size (an exact multiple leaves no tail →
+  `check_dev_size` fails; hence the 513-not-512 MiB bdev and the `+1` in file
+  sizes). A segment too large for a small device is silently right-sized down by
+  `uDepotSalsa::init()` so GC keeps its minimum spare-segment count.
+- **Hugepage invariant for directory tables (and the shutdown OOB it explains).**
+  Because segments tile a `segment_bytes` grid, a segment whose **full size
+  (`get_seg_size()*grain`) is a 2 MiB multiple** both sits at a 2 MiB-aligned
+  device offset *and* has a 2 MiB-aligned length — so the **whole segment** is a
+  `MAP_HUGETLB`-mappable unit. The correct design maps the full segment
+  (`get_seg_size()*grain`, metadata grain included) and writes the directory's
+  header/table/footer at their normal offsets inside it — footer still at
+  `seg_size*grain - sizeof(dirmap_ftr)` — leaving the per-segment salsa metadata
+  grain(s) at the tail `[seg_size*grain, get_seg_size()*grain)` untouched (the
+  writeback must stop at the footer, not clobber them). No `align_down`, no
+  separate footer I/O: the metadata just lives past the footer, still inside the
+  mapping. The footer's on-disk offset is fixed by geometry and never moves. The
+  bug that motivated this: `grow()` instead mapped only the **net** region and,
+  for huge pages, `align_down(seg_size*grain, 2 MiB)` — smaller than the net
+  region — yet still wrote the footer at `seg_size*grain - sizeof(ftr)`, past the
+  mapping's end: an intermittent shutdown OOB (only the SPDK path reserves
+  hugepages, so tmpfs backends never hit it). The **committed fix is a stopgap**:
+  it takes the huge mapping only when the net `seg_size*grain` is *itself* 2 MiB-
+  aligned — nearly never, since the per-segment metadata steals the last grain —
+  so the directory maps on 4 KiB pages. Do not read that gate as "hugepages need
+  the net region 2 MiB-aligned"; hugepages need the *full segment* 2 MiB-aligned
+  (the default 16 MiB segment already is) and the mapping extended to the whole
+  segment. The proper fix is tracked in `docs/TODO-spdk-testing.md`.
 - **I/O backends**: Located in `src/uDepot/io/`. Each backend implements `uDepotIO_` interface. SPDK backends require DMA-safe buffers for NVMe commands.
 - **SpdkQpair**: Per-thread NVMe queue pair. `read_sync`/`write_sync` handle DMA buffer allocation internally. `read_raw_sync`/`write_raw_sync` expect pre-allocated DMA buffers.
 - **Python bindings**: `pyudepot` via ctypes in `src/uDepot/net/py-udepot.cc`. Shared library built as `libpyudepot.so`.
@@ -160,14 +200,20 @@ build test rather than a perf assertion.
 The invariant is checked on every backend the benchmark supports (AIO and
 io_uring). An invariant that only holds on one backend is not an invariant.
 
-SPDK is **not** covered. `make -C trt run_spdk_bdev_test` and
-`run_spdk_bdev_perf` run against a memory-backed bdev and restore the hugepages
-they reserve, but they use SPDK's own event framework and never touch
-`trt::SPDK`, `SpdkQpair`, or the TRT scheduler -- they are build and
-environment smoke tests, not backend coverage. Testing the backend needs an
-NVMe namespace (it uses the raw NVMe driver, not bdev), and the NVMe-oF route
-that would provide one stalls after store init. See
-`docs/TODO-spdk-testing.md`.
+The SPDK backend is covered by `make BUILD_SPDK=1 run_spdk_nvmef_test`
+(`scripts/spdk-nvmef-test.sh`): it starts a loopback SPDK `nvmf_tgt` exporting a
+RAM-backed malloc bdev as an NVMe namespace over TCP and runs `udepot-test`'s
+SPDK backend (`-u 7`) against it as a fabrics initiator, so it drives
+`trt::SPDK`, `SpdkQpair` and the TRT scheduler on the I/O path. The backend
+learns the target from the `UDEPOT_NVMEF` env var, so `udepot-test` needs no new
+flag. This is separate from `make -C trt run_spdk_bdev_test` /
+`run_spdk_bdev_perf`, which use SPDK's own event framework and never touch the
+backend -- they are build/environment smoke tests, not backend coverage. Getting
+the nvmef route working exposed three latent bugs (the completion poller was
+spawned with a discarded awaitable and never ran; the admin queue was never
+polled so fabrics keep-alives timed out; the directory footer overran a
+huge-page mapping at shutdown); see `docs/TODO-spdk-testing.md`. The zero-copy
+perf invariant over SPDK is still not asserted in a Makefile target.
 
 Notes:
 - Both PUT and GET are gated, and hold at a few thousand ops -- but only because

@@ -532,7 +532,7 @@ udepot-memcache-test: $(MC_SERVER) $(MC_TEST)
 # is an invariant measured inside one run -- io_layer_bench --compare runs the
 # raw-buffer and Mbuff interfaces alternately over one store and fails if the
 # zero-copy path is not ahead. CI runs these on every push.
-.PHONY: run_perf_test run_pyudepot_build_test
+.PHONY: run_perf_test run_pyudepot_build_test run_spdk_nvmef_test
 
 # Zero-copy invariant: the Mbuff (zero-copy) KV interface must not be slower than
 # the raw-buffer (copy) one, on PUT and GET. Driven by udepot-test -- the same
@@ -564,6 +564,24 @@ run_perf_test: bin/udepot-test
 # the machine than about the code.
 run_pyudepot_build_test: $(LIBPYUDEPOT) python/build-test.py
 	@$(call do_run_test, PYTHONPATH=python/ python3 python/build-test.py)
+
+# SPDK backend, end to end, against a software NVMe-over-Fabrics target -- the
+# first test that actually drives trt::SPDK / SpdkQpair / the TRT scheduler on
+# the I/O path (the trt spdk_bdev_* targets are build/environment smoke tests
+# that never touch the backend). scripts/spdk-nvmef-test.sh starts an SPDK
+# nvmf_tgt exporting a RAM-backed malloc bdev over TCP loopback and runs
+# udepot-test's SPDK backend (-u 7) against it; the target address reaches the
+# backend through the UDEPOT_NVMEF env var, so udepot-test needs no new flag.
+#
+# Needs a BUILD_SPDK=1 build and root (hugepages + the loopback target); CI runs
+# it under sudo. See docs/TODO-spdk-testing.md for the history.
+SPDK_NVMEF_OPS ?= 20000
+run_spdk_nvmef_test: bin/udepot-test
+ifeq (1, $(BUILD_SPDK))
+	@$(call do_run_test, scripts/spdk-nvmef-test.sh $(SPDK_NVMEF_OPS))
+else
+	@echo "run_spdk_nvmef_test requires a BUILD_SPDK=1 build" >&2; exit 1
+endif
 
 # Block-device sizing test.
 #

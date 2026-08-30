@@ -28,6 +28,7 @@
 namespace bi = boost::intrusive;
 
 #include <spdk/nvme.h>
+#include <spdk/env.h> // spdk_get_ticks(), spdk_get_ticks_hz()
 
 #include <rte_config.h>
 #include <rte_malloc.h>
@@ -389,9 +390,11 @@ struct SpdkState {
     State    spdk_state;
     QpairMap spdk_qpairs;
     rte_mempool *spdk_bpool;
+    uint64_t spdk_admin_last_tick; // last time the admin queues were polled
 
     SpdkState() : spdk_state(State::UNINITIALIZED),
-                  spdk_bpool(NULL) {} // buffer pool
+                  spdk_bpool(NULL),
+                  spdk_admin_last_tick(0) {} // buffer pool
 
 
     void init(SpdkGlobalState &sg);
@@ -519,6 +522,50 @@ struct SpdkState {
         }
 
         return n;
+    }
+
+    // Drive each controller's admin queue.
+    //
+    // On an NVMe-over-Fabrics (TCP/RDMA) controller the keep-alive timer only
+    // advances when the admin queue is polled: the host's keep-alive command
+    // completions are reaped here, and the transport only (re)arms the next
+    // keep-alive once the previous one completes. execute_completions() above
+    // polls the *I/O* qpair only, so without this the target sees no
+    // keep-alives, hits its keep-alive timeout, and disconnects the host --
+    // after which no I/O ever completes and the store hangs right after init.
+    // Local PCIe controllers default to KATO=0 (keep-alive disabled), so this
+    // is a cheap no-op for them.
+    //
+    // Throttled to ~10x/sec: keep-alive deadlines are on the order of seconds,
+    // and the admin queue must not be polled from the I/O hot path on every
+    // completion. Must run on the same thread that owns the qpairs (and hence
+    // the controller), which the poller task does.
+    void process_admin_completions() {
+        if (spdk_qpairs.empty())
+            return;
+
+        const uint64_t now = spdk_get_ticks();
+        const uint64_t hz  = spdk_get_ticks_hz();
+        if (spdk_admin_last_tick != 0 && (now - spdk_admin_last_tick) < hz / 10)
+            return;
+        spdk_admin_last_tick = now;
+
+        // De-duplicate controllers cheaply: there is normally a single one, and
+        // several qpairs can share it. Calling it twice would be harmless but
+        // wasteful.
+        struct spdk_nvme_ctrlr *seen[8];
+        unsigned seen_nr = 0;
+        for (auto &qp : spdk_qpairs) {
+            struct spdk_nvme_ctrlr *c = qp.first->sn_ctlr;
+            bool dup = false;
+            for (unsigned i = 0; i < seen_nr; i++)
+                if (seen[i] == c) { dup = true; break; }
+            if (dup)
+                continue;
+            if (seen_nr < (sizeof(seen) / sizeof(seen[0])))
+                seen[seen_nr++] = c;
+            spdk_nvme_ctrlr_process_admin_completions(c);
+        }
     }
 };
 
