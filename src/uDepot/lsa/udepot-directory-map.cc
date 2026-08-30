@@ -193,20 +193,23 @@ uDepotDirectoryMap<RT>::grow()
 		const u64 mmap_offset = grain * grain_size;
 		bool huge = false;
 		// Huge pages for the directory table are a STOPGAP -- see CLAUDE.md
-		// "Hugepage invariant for directory tables". The proper design maps
-		// align_down(net, 2MiB) with MAP_HUGETLB (a segment sized as a 2MiB
-		// multiple starts on a 2MiB-aligned device offset) and keeps the
-		// per-segment metadata grain and the 512B footer in the reserved tail
-		// beyond that span, reached separately. The old code instead sized the
-		// huge mapping to align_down(seg_size*grain_size, 2MiB) -- smaller than
-		// the net region -- but still wrote the footer at
-		// seg_size*grain_size - sizeof(dirmap_ftr) (where restore() preads it),
-		// past the mapping's end: an intermittent shutdown OOB that only the SPDK
-		// path (which reserves hugepages) ever hit. Until the footer is moved to
-		// the tail, take the huge mapping only when the net region is *itself*
-		// 2MiB-aligned -- nearly never, since the per-segment metadata steals the
-		// last grain -- so in practice the directory maps on 4KiB pages, which
-		// span the whole net region and keep the footer offset mapped.
+		// "Hugepage invariant for directory tables". The proper design maps the
+		// *full* segment (get_seg_size()*grain_size, which the invariant requires
+		// to be a 2MiB multiple, at a 2MiB-aligned device offset) with
+		// MAP_HUGETLB and writes header/table/footer at their normal offsets
+		// inside it -- footer at seg_size*grain_size - sizeof(dirmap_ftr) -- while
+		// leaving the per-segment salsa metadata grain(s) at the tail
+		// [seg_size*grain_size, get_seg_size()*grain_size) untouched. The old code
+		// instead mapped only the net region and, for huge pages, shrank it to
+		// align_down(seg_size*grain_size, 2MiB) -- smaller than the net region --
+		// yet still wrote the footer at seg_size*grain_size - sizeof(dirmap_ftr)
+		// (where restore() preads it), past the mapping's end: an intermittent
+		// shutdown OOB that only the SPDK path (which reserves hugepages) ever
+		// hit. Until the mapping is extended to the full segment, take the huge
+		// mapping only when the net region is *itself* 2MiB-aligned -- nearly
+		// never, since the per-segment metadata steals the last grain -- so in
+		// practice the directory maps on 4KiB pages, which span the whole net
+		// region and keep the footer offset mapped.
 		if (mmap_size_huge_b == mmap_size_b) {
 			dme.mm_region = udepot_io_m.mmap(nullptr, mmap_size_huge_b, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_HUGETLB, mmap_offset);
 			if (MAP_FAILED != dme.mm_region)

@@ -64,12 +64,16 @@ never reached):
    itself 2MiB-aligned (nearly never — the per-segment metadata steals the last
    grain of a 2MiB-multiple segment), so in practice the directory maps on 4KiB
    pages, which span the whole net region and keep the footer offset mapped. The
-   **proper fix** keeps the directory on hugepages: a segment sized as a 2MiB
-   multiple starts on a 2MiB-aligned device offset, so map `align_down(net, 2MiB)`
-   with `MAP_HUGETLB` and keep the per-segment metadata grain and the 512B footer
-   in the reserved tail beyond that span, reached via I/O (`restore()` already
-   `pread`s the footer). It needs a restore round-trip test (write, reopen
-   without `--force-destroy`, footer read back and matches). See
+   **proper fix** keeps the directory on hugepages by mapping the **full segment**:
+   when `get_seg_size()*grain` is a 2MiB multiple it both sits at a 2MiB-aligned
+   device offset and has a 2MiB-aligned length, so map the whole segment
+   (metadata grain included) with `MAP_HUGETLB` and write header/table/footer at
+   their normal offsets inside it -- footer still at `seg_size*grain -
+   sizeof(ftr)` -- leaving the per-segment metadata grain(s) at the tail
+   `[seg_size*grain, get_seg_size()*grain)` untouched (the writeback must stop at
+   the footer). No `align_down`, no separate footer I/O. The default 16MiB segment
+   already satisfies the alignment. It needs a restore round-trip test (write,
+   reopen without `--force-destroy`, footer read back and matches). See
    `src/uDepot/lsa/udepot-directory-map.cc` and CLAUDE.md, "Segment geometry" /
    "Hugepage invariant for directory tables".
 

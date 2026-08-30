@@ -95,23 +95,28 @@ These are foundational constraints. Every change must preserve them.
   sizes). A segment too large for a small device is silently right-sized down by
   `uDepotSalsa::init()` so GC keeps its minimum spare-segment count.
 - **Hugepage invariant for directory tables (and the shutdown OOB it explains).**
-  Because segments tile a `segment_bytes` grid, a segment whose **size is a 2 MiB
-  multiple** starts on a 2 MiB-aligned device offset, so its net region *can* be
-  mapped `MAP_HUGETLB`. The correct design maps `align_down(net, 2 MiB)` on huge
-  pages and keeps the per-segment metadata grain(s) and the 512-byte footer in
-  the reserved tail *beyond* that span, reached by pointer arithmetic / separate
-  I/O — never addressed through the huge mapping. The footer's on-disk offset is
-  fixed by geometry and never moves. The bug that motivated this: `grow()` sized
-  the huge mapping to `align_down(seg_size*grain, 2 MiB)` — smaller than the net
+  Because segments tile a `segment_bytes` grid, a segment whose **full size
+  (`get_seg_size()*grain`) is a 2 MiB multiple** both sits at a 2 MiB-aligned
+  device offset *and* has a 2 MiB-aligned length — so the **whole segment** is a
+  `MAP_HUGETLB`-mappable unit. The correct design maps the full segment
+  (`get_seg_size()*grain`, metadata grain included) and writes the directory's
+  header/table/footer at their normal offsets inside it — footer still at
+  `seg_size*grain - sizeof(dirmap_ftr)` — leaving the per-segment salsa metadata
+  grain(s) at the tail `[seg_size*grain, get_seg_size()*grain)` untouched (the
+  writeback must stop at the footer, not clobber them). No `align_down`, no
+  separate footer I/O: the metadata just lives past the footer, still inside the
+  mapping. The footer's on-disk offset is fixed by geometry and never moves. The
+  bug that motivated this: `grow()` instead mapped only the **net** region and,
+  for huge pages, `align_down(seg_size*grain, 2 MiB)` — smaller than the net
   region — yet still wrote the footer at `seg_size*grain - sizeof(ftr)`, past the
-  mapping's end, an intermittent shutdown OOB (only the SPDK path reserves
+  mapping's end: an intermittent shutdown OOB (only the SPDK path reserves
   hugepages, so tmpfs backends never hit it). The **committed fix is a stopgap**:
-  it takes the huge mapping only when `seg_size*grain` is *itself* 2 MiB-aligned
-  — nearly never, since the per-segment metadata steals the last grain — so the
-  directory maps on 4 KiB pages. Do not read that gate as "hugepages need the net
-  region 2 MiB-aligned"; hugepages need the *segment* 2 MiB-aligned plus the
-  footer moved into the tail. The proper fix is tracked in
-  `docs/TODO-spdk-testing.md`.
+  it takes the huge mapping only when the net `seg_size*grain` is *itself* 2 MiB-
+  aligned — nearly never, since the per-segment metadata steals the last grain —
+  so the directory maps on 4 KiB pages. Do not read that gate as "hugepages need
+  the net region 2 MiB-aligned"; hugepages need the *full segment* 2 MiB-aligned
+  (the default 16 MiB segment already is) and the mapping extended to the whole
+  segment. The proper fix is tracked in `docs/TODO-spdk-testing.md`.
 - **I/O backends**: Located in `src/uDepot/io/`. Each backend implements `uDepotIO_` interface. SPDK backends require DMA-safe buffers for NVMe commands.
 - **SpdkQpair**: Per-thread NVMe queue pair. `read_sync`/`write_sync` handle DMA buffer allocation internally. `read_raw_sync`/`write_raw_sync` expect pre-allocated DMA buffers.
 - **Python bindings**: `pyudepot` via ctypes in `src/uDepot/net/py-udepot.cc`. Shared library built as `libpyudepot.so`.
