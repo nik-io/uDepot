@@ -59,10 +59,19 @@ never reached):
    pages its size is `align_down(seg_size*grain_size, 2MiB)` — smaller — so the
    footer write landed past the mapping. Only the SPDK path reserves hugepages,
    which is why AIO/io_uring on tmpfs never hit it. The footer's on-disk offset
-   is fixed by the restore path, so the fix keeps that offset and instead only
-   takes the huge-page mapping when `seg_size*grain_size` is itself 2MiB-aligned
-   (so the mapping always covers the footer); otherwise the 4KiB mapping, which
-   spans the whole region, is used. See `src/uDepot/lsa/udepot-directory-map.cc`.
+   is fixed by the restore path and never moves. The committed fix is a
+   **stopgap**: it takes the huge-page mapping only when `seg_size*grain_size` is
+   itself 2MiB-aligned (nearly never — the per-segment metadata steals the last
+   grain of a 2MiB-multiple segment), so in practice the directory maps on 4KiB
+   pages, which span the whole net region and keep the footer offset mapped. The
+   **proper fix** keeps the directory on hugepages: a segment sized as a 2MiB
+   multiple starts on a 2MiB-aligned device offset, so map `align_down(net, 2MiB)`
+   with `MAP_HUGETLB` and keep the per-segment metadata grain and the 512B footer
+   in the reserved tail beyond that span, reached via I/O (`restore()` already
+   `pread`s the footer). It needs a restore round-trip test (write, reopen
+   without `--force-destroy`, footer read back and matches). See
+   `src/uDepot/lsa/udepot-directory-map.cc` and CLAUDE.md, "Segment geometry" /
+   "Hugepage invariant for directory tables".
 
 ## What is already in place (unchanged, still correct)
 

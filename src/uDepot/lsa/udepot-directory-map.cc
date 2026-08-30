@@ -192,18 +192,21 @@ uDepotDirectoryMap<RT>::grow()
 		}
 		const u64 mmap_offset = grain * grain_size;
 		bool huge = false;
-		// Only take the huge-page mapping when the segment's data region is
-		// itself a multiple of the huge-page size. MAP_HUGETLB requires a
-		// 2MiB-aligned length, so for any other geometry the huge mapping is
-		// align_down(seg_size*grain_size, 2MiB) -- strictly smaller than the
-		// region -- while the directory footer lives at
-		// seg_size*grain_size - sizeof(dirmap_ftr) on disk (see restore(), which
-		// preads it at md_grain*grain_size - sizeof(ftr)). A footer written
-		// through a too-small huge mapping lands past its end: an out-of-bounds
-		// write that crashes shutdown intermittently. The 4KiB mapping covers
-		// the whole region and keeps size_b == seg_size*grain_size, so the
-		// footer offset is always mapped. This surfaced only once the SPDK
-		// backend (which reserves hugepages) actually ran to shutdown.
+		// Huge pages for the directory table are a STOPGAP -- see CLAUDE.md
+		// "Hugepage invariant for directory tables". The proper design maps
+		// align_down(net, 2MiB) with MAP_HUGETLB (a segment sized as a 2MiB
+		// multiple starts on a 2MiB-aligned device offset) and keeps the
+		// per-segment metadata grain and the 512B footer in the reserved tail
+		// beyond that span, reached separately. The old code instead sized the
+		// huge mapping to align_down(seg_size*grain_size, 2MiB) -- smaller than
+		// the net region -- but still wrote the footer at
+		// seg_size*grain_size - sizeof(dirmap_ftr) (where restore() preads it),
+		// past the mapping's end: an intermittent shutdown OOB that only the SPDK
+		// path (which reserves hugepages) ever hit. Until the footer is moved to
+		// the tail, take the huge mapping only when the net region is *itself*
+		// 2MiB-aligned -- nearly never, since the per-segment metadata steals the
+		// last grain -- so in practice the directory maps on 4KiB pages, which
+		// span the whole net region and keep the footer offset mapped.
 		if (mmap_size_huge_b == mmap_size_b) {
 			dme.mm_region = udepot_io_m.mmap(nullptr, mmap_size_huge_b, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_HUGETLB, mmap_offset);
 			if (MAP_FAILED != dme.mm_region)
