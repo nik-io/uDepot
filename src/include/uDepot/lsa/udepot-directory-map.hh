@@ -102,7 +102,12 @@ public:
 		uDepotMap<RT> map;
 		void *mm_region;
 		u64   grain_offset;
-		u64   size_b;
+		u64   size_b;      // net region bytes (header + table + footer); table
+		                   // sizing, footer offset, writeback and grain
+		                   // invalidation are all relative to this. The mmap()
+		                   // itself always spans the whole segment
+		                   // (get_seg_size()*grain), which is what mprotect()/
+		                   // munmap() use.
 		bool  huge;
 	};
 
