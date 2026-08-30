@@ -110,13 +110,19 @@ These are foundational constraints. Every change must preserve them.
   for huge pages, `align_down(seg_size*grain, 2 MiB)` — smaller than the net
   region — yet still wrote the footer at `seg_size*grain - sizeof(ftr)`, past the
   mapping's end: an intermittent shutdown OOB (only the SPDK path reserves
-  hugepages, so tmpfs backends never hit it). The **committed fix is a stopgap**:
-  it takes the huge mapping only when the net `seg_size*grain` is *itself* 2 MiB-
-  aligned — nearly never, since the per-segment metadata steals the last grain —
-  so the directory maps on 4 KiB pages. Do not read that gate as "hugepages need
-  the net region 2 MiB-aligned"; hugepages need the *full segment* 2 MiB-aligned
-  (the default 16 MiB segment already is) and the mapping extended to the whole
-  segment. The proper fix is tracked in `docs/TODO-spdk-testing.md`.
+  hugepages, so tmpfs backends never hit it). This is now **fixed as described
+  above**: `grow()` and `restore()` always `mmap` the whole segment
+  (`get_seg_size()*grain`), taking `MAP_HUGETLB` when that size is a 2 MiB
+  multiple and falling back to 4 KiB pages otherwise — conditional, not enforced,
+  so the segment size stays the user's choice (the default 16 MiB segment gets
+  huge pages). The mapping length is therefore always the full segment and is
+  used only for `mprotect()`/`munmap()`; `size_b` stays the net region and drives
+  table sizing, footer offset, grain invalidation and the writeback, which stops
+  at the footer (`invalidate_ftr()` bounds its `msync` there) so the metadata
+  tail is never clobbered. Verified by strace (a real `MAP_HUGETLB` mmap of the
+  16 MiB segment succeeds) plus `run_spdk_nvmef_test`; the earlier stopgap — huge
+  only when the *net* region was itself 2 MiB-aligned, so 4 KiB in practice — is
+  gone. History in `docs/TODO-spdk-testing.md`.
 - **I/O backends**: Located in `src/uDepot/io/`. Each backend implements `uDepotIO_` interface. SPDK backends require DMA-safe buffers for NVMe commands.
 - **SpdkQpair**: Per-thread NVMe queue pair. `read_sync`/`write_sync` handle DMA buffer allocation internally. `read_raw_sync`/`write_raw_sync` expect pre-allocated DMA buffers.
 - **Python bindings**: `pyudepot` via ctypes in `src/uDepot/net/py-udepot.cc`. Shared library built as `libpyudepot.so`.
