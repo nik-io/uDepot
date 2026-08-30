@@ -59,21 +59,31 @@ never reached):
    pages its size is `align_down(seg_size*grain_size, 2MiB)` — smaller — so the
    footer write landed past the mapping. Only the SPDK path reserves hugepages,
    which is why AIO/io_uring on tmpfs never hit it. The footer's on-disk offset
-   is fixed by the restore path and never moves. The committed fix is a
-   **stopgap**: it takes the huge-page mapping only when `seg_size*grain_size` is
-   itself 2MiB-aligned (nearly never — the per-segment metadata steals the last
-   grain of a 2MiB-multiple segment), so in practice the directory maps on 4KiB
-   pages, which span the whole net region and keep the footer offset mapped. The
-   **proper fix** keeps the directory on hugepages by mapping the **full segment**:
-   when `get_seg_size()*grain` is a 2MiB multiple it both sits at a 2MiB-aligned
-   device offset and has a 2MiB-aligned length, so map the whole segment
-   (metadata grain included) with `MAP_HUGETLB` and write header/table/footer at
-   their normal offsets inside it -- footer still at `seg_size*grain -
-   sizeof(ftr)` -- leaving the per-segment metadata grain(s) at the tail
-   `[seg_size*grain, get_seg_size()*grain)` untouched (the writeback must stop at
-   the footer). No `align_down`, no separate footer I/O. The default 16MiB segment
-   already satisfies the alignment. It needs a restore round-trip test (write,
-   reopen without `--force-destroy`, footer read back and matches). See
+   is fixed by the restore path and never moves.
+
+   PR #20 shipped a **stopgap**: take the huge-page mapping only when
+   `seg_size*grain_size` was itself 2MiB-aligned (nearly never — the per-segment
+   metadata steals the last grain of a 2MiB-multiple segment), so in practice the
+   directory mapped on 4KiB pages, which span the whole net region and keep the
+   footer offset mapped.
+
+   **Now fixed properly (PR #21).** `grow()` and `restore()` always `mmap` the
+   **full segment** (`get_seg_size()*grain`): when that size is a 2MiB multiple
+   the segment both sits at a 2MiB-aligned device offset and has a 2MiB-aligned
+   length, so it is mapped with `MAP_HUGETLB` (falling back to 4KiB pages —
+   still of the whole segment — when the reservation is unavailable), with
+   header/table/footer at their normal offsets inside it; the footer at
+   `seg_size*grain - sizeof(ftr)` is now well within the mapping, and the
+   per-segment metadata grain(s) in the tail `[seg_size*grain,
+   get_seg_size()*grain)` are left untouched. Conditional, not enforced — any
+   other segment size just maps on 4KiB pages, so the segment size stays the
+   user's choice; the default 16MiB segment gets huge pages. The mapping length
+   is always the full segment (`mprotect()`/`munmap()` only); `size_b` stays the
+   net region and still drives table sizing, footer offset, grain invalidation
+   and the writeback, which stops at the footer (`invalidate_ftr()` bounds its
+   `msync` there). Verified by strace — a real `MAP_HUGETLB` mmap of the 16MiB
+   segment succeeds — and by `run_spdk_nvmef_test` (the shutdown that previously
+   crashed ~1/3 of runs is clean). See
    `src/uDepot/lsa/udepot-directory-map.cc` and CLAUDE.md, "Segment geometry" /
    "Hugepage invariant for directory tables".
 
