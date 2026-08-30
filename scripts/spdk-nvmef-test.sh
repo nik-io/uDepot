@@ -110,9 +110,14 @@ if [ "$NCPU" -ge 3 ]; then
     PIN=(taskset -c "1-$((NCPU-1))")
 fi
 log "running udepot-test SPDK backend ($OPS ops) on ${NCPU} cpus"
+# grain 4096 (a realistic device page/sector), segment 4096 grains = 16 MiB.
+# The segment must be small enough that the 513 MiB device yields >= 4 GC-spare
+# segments (SALSA's minimum); at 16 MiB that is 32 segments, comfortably above
+# the minimum. A larger segment (e.g. 32 MiB) is silently right-sized down by
+# uDepot on a device this small -- see udepot-lsa.cc's segment-size fallback.
 UDEPOT_NVMEF="$TADDR:$TPORT:$NQN" LD_LIBRARY_PATH="$DPDK_LIB" \
     "${PIN[@]}" "$UDEPOT_TEST" -f 'SPDK' \
-        -w "$OPS" -r "$OPS" -t 1 --grain-size "$SECTOR" --val-size 3072 \
+        -w "$OPS" -r "$OPS" -t 1 --grain-size 4096 --segment-size 4096 --val-size 3072 \
         -u 7 --thin --force-destroy
 rc=$?
 [ $rc -eq 0 ] || fail "udepot-test SPDK run failed (rc=$rc)"
